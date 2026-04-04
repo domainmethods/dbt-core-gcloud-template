@@ -33,29 +33,49 @@ jobs:
       - name: Configure docker auth to Artifact Registry
         run: gcloud auth configure-docker "${{ env.REGION }}-docker.pkg.dev"
 
-      - name: Build & push container
+      - name: Build container
         run: |
           IMAGE_URI="${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_PROD }}/${{ env.REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
           echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
           docker build -t "$IMAGE_URI" .
-          docker push "$IMAGE_URI"
+
+      - name: Smoke test container
+        run: |
+          echo "Verifying container structure..."
+          docker run --rm --entrypoint sh "$IMAGE_URI" -c "
+            set -e
+            echo 'Checking directory structure...'
+            for d in hooks macros models seeds snapshots profiles; do
+              [ -d \"/app/\$d\" ] || { echo \"FAIL: /app/\$d missing\"; exit 1; }
+            done
+            echo 'Checking dbt is importable...'
+            python -c 'import dbt.version; print(f\"dbt-core {dbt.version.installed}\")'
+            echo 'Checking entrypoint exists...'
+            [ -x /app/entrypoint.sh ] || { echo 'FAIL: entrypoint.sh not executable'; exit 1; }
+            echo 'Smoke test passed.'
+          "
+
+      - name: Push container
+        run: docker push "$IMAGE_URI"
 
       - name: Create/Update Cloud Run Job
         run: |
           JOB=dbt-prod-run
           set -e
+          COMMON_ARGS=(
+            --image "$IMAGE_URI"
+            --service-account "${{ secrets.GCP_PROD_SA_EMAIL }}"
+            --task-timeout=3600s
+            --set-env-vars "DBT_TARGET=prod,DBT_GCP_PROJECT_PROD=${{ secrets.GCP_PROJECT_PROD }},DBT_BQ_DATASET_PROD=${{ secrets.PROD_DATASET }},DBT_BQ_LOCATION=${{ secrets.BQ_LOCATION }},DBT_ARTIFACTS_BUCKET=${{ secrets.DBT_ARTIFACTS_BUCKET }},DBT_DOCS_BUCKET=${{ secrets.DBT_DOCS_BUCKET }},GENERATE_DOCS=true,DBT_PROFILES_DIR=/app/profiles"
+            --region "${{ env.REGION }}"
+          )
+          # To inject Secret Manager secrets at runtime, add to COMMON_ARGS:
+          #   --set-secrets "API_KEY=api-key-secret:latest,DB_PASS=db-password:latest"
+          # Requires: infra/10-bootstrap.sh grants secretAccessor to the prod SA.
           if gcloud run jobs describe "$JOB" --region "${{ env.REGION }}" >/dev/null 2>&1; then
-            gcloud run jobs update "$JOB" \
-              --image "$IMAGE_URI" \
-              --service-account "${{ secrets.GCP_PROD_SA_EMAIL }}" \
-              --set-env-vars=DBT_TARGET=prod,DBT_GCP_PROJECT_PROD=${{ secrets.GCP_PROJECT_PROD }},DBT_BQ_DATASET_PROD=${{ secrets.PROD_DATASET }},DBT_BQ_LOCATION=${{ secrets.BQ_LOCATION }},DBT_ARTIFACTS_BUCKET=${{ secrets.DBT_ARTIFACTS_BUCKET }},DBT_DOCS_BUCKET=${{ secrets.DBT_DOCS_BUCKET }},GENERATE_DOCS=true,DBT_PROFILES_DIR=/app/profiles \
-              --region "${{ env.REGION }}"
+            gcloud run jobs update "$JOB" "${COMMON_ARGS[@]}"
           else
-            gcloud run jobs create "$JOB" \
-              --image "$IMAGE_URI" \
-              --service-account "${{ secrets.GCP_PROD_SA_EMAIL }}" \
-              --set-env-vars=DBT_TARGET=prod,DBT_GCP_PROJECT_PROD=${{ secrets.GCP_PROJECT_PROD }},DBT_BQ_DATASET_PROD=${{ secrets.PROD_DATASET }},DBT_BQ_LOCATION=${{ secrets.BQ_LOCATION }},DBT_ARTIFACTS_BUCKET=${{ secrets.DBT_ARTIFACTS_BUCKET }},DBT_DOCS_BUCKET=${{ secrets.DBT_DOCS_BUCKET }},GENERATE_DOCS=true,DBT_PROFILES_DIR=/app/profiles \
-              --region "${{ env.REGION }}" \
+            gcloud run jobs create "$JOB" "${COMMON_ARGS[@]}" \
               --memory=2Gi --cpu=1 --max-retries=0
           fi
 
