@@ -467,7 +467,7 @@ The sections above provide quick-start guides. For detailed reference:
 
 * Configure variables in `infra/.env` (copied from `infra/.env.example`)
 * `setup-env.sh` loads `infra/.env`, sets `DBT_PROFILES_DIR=profiles`, and generates `DBT_USER` from your gcloud email
-* Ensure the profile name in `profiles/profiles.yml` matches `dbt_project.yml` (profile: `domainmethods`)
+* Ensure the profile name in `profiles/profiles.yml` matches `dbt_project.yml` (profile: `dbt_gcloud`)
 
 **Environment Variables:**
 

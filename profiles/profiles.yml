@@ -1,4 +1,4 @@
-dbt_cloud:
+dbt_gcloud:
   target: "{{ env_var('DBT_TARGET', 'dev') }}"
   outputs:
     dev:

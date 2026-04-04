@@ -33,7 +33,7 @@ else
   DATASET_VAL="${DBT_BQ_DATASET_PROD:-analytics}"
   LOCATION_VAL="${DBT_BQ_LOCATION:-US}"
   cat > "$DBT_PROFILES_DIR/profiles.yml" <<YAML
-dbt_core_gcloud:
+dbt_gcloud:
   target: "prod"
   outputs:
     prod:
