@@ -82,64 +82,12 @@ if [[ "${RUN_FRESHNESS}" == "true" ]]; then
     dbt ${DBT_NO_COLOR_FLAG} --log-format json source freshness
   fi
   # Summarize freshness (if sources.json exists)
-  python - << 'PY'
-import json, os
-sp = os.path.join('target','sources.json')
-if os.path.exists(sp):
-    try:
-        with open(sp) as f:
-            doc = json.load(f)
-        statuses = {}
-        for src in doc.get('sources', []):
-            st = (src.get('freshness') or {}).get('status') or src.get('status') or 'unknown'
-            statuses[st] = statuses.get(st, 0) + 1
-        print(json.dumps({"dbt_freshness": {"statuses": statuses}}))
-        parts = ", ".join(f"{k}={v}" for k, v in sorted(statuses.items())) or "no entries"
-        print(f"dbt freshness: {parts}")
-    except Exception as e:
-        print(json.dumps({"dbt_freshness": {"status": "error_reading_sources", "error": str(e)}}))
-        print(f"dbt freshness: failed to read sources.json ({e})")
-else:
-    print(json.dumps({"dbt_freshness": {"status": "missing_sources_json"}}))
-    print("dbt freshness: missing target/sources.json")
-PY
+  python scripts/lib/freshness_summary.py
 fi
 
-# Emit a one-line JSON summary for alerting/observability
-python - << 'PY'
-import json, os, sys
-path = os.path.join('target','run_results.json')
-try:
-    with open(path) as f:
-        doc = json.load(f)
-except Exception as e:
-    print(json.dumps({"dbt_summary": {"status": "missing_run_results", "error": str(e)}}))
-    print(f"dbt summary: missing run_results.json ({e})")
-    sys.exit(0)
-
-results = doc.get('results', [])
-status_counts = {}
-for r in results:
-    s = r.get('status', 'unknown')
-    status_counts[s] = status_counts.get(s, 0) + 1
-
-summary = {
-    "total": len(results),
-    "elapsed": doc.get('elapsed_time'),
-    "statuses": status_counts,
-}
-
-# Backward-compatible booleans
-summary["failed"] = status_counts.get('error', 0) + status_counts.get('fail', 0)
-summary["successful"] = status_counts.get('success', 0)
-
-print(json.dumps({"dbt_summary": summary}))
-# Human-friendly one-liner
-failed = summary.get("failed", 0)
-succ = summary.get("successful", 0)
-elapsed = summary.get("elapsed")
-print(f"dbt summary: {succ} succeeded, {failed} failed, total={summary['total']}, elapsed={elapsed}s")
-PY
+# Emit summary and exit non-zero if dbt had failures
+python scripts/lib/dbt_summary.py
+DBT_EXIT=$?
 
 if [[ "${GENERATE_DOCS:-false}" == "true" ]]; then
   dbt ${DBT_NO_COLOR_FLAG} docs generate --static
@@ -148,51 +96,25 @@ if [[ "${GENERATE_DOCS:-false}" == "true" ]]; then
   EXPORT_DOCS_BUCKET="${DBT_DOCS_BUCKET:-${DBT_ARTIFACTS_BUCKET:-}}"
   if [[ -n "${EXPORT_DOCS_BUCKET}" ]]; then
     echo "Uploading docs to gs://${EXPORT_DOCS_BUCKET}/index.html"
-    python - << 'PY'
-import os
-from google.cloud import storage
-
-bucket_name = os.environ.get("DBT_DOCS_BUCKET") or os.environ.get("DBT_ARTIFACTS_BUCKET")
-path = os.path.join("target", "index.html")
-client = storage.Client()
-bucket = client.bucket(bucket_name)
-blob = bucket.blob("index.html")
-blob.cache_control = "no-cache"
-blob.content_type = "text/html"
-with open(path, "rb") as f:
-    blob.upload_from_file(f, content_type="text/html")
-print(f"Uploaded to gs://{bucket_name}/index.html")
-PY
+    python scripts/lib/upload_docs.py
   fi
 fi
 
 # Upload core artifacts to artifacts bucket for Slim CI deferral
 if [[ -n "${DBT_ARTIFACTS_BUCKET:-}" ]]; then
   echo "Uploading manifest.json, run_results.json, and sources.json (if present) to gs://${DBT_ARTIFACTS_BUCKET}/prod/"
-  python - << 'PY'
-import os
-from google.cloud import storage
-
-bucket_name = os.environ["DBT_ARTIFACTS_BUCKET"]
-client = storage.Client()
-bucket = client.bucket(bucket_name)
-for name in ("manifest.json", "run_results.json", "sources.json"):
-    p = os.path.join("target", name)
-    if os.path.exists(p):
-        blob = bucket.blob(f"prod/{name}")
-        blob.cache_control = "no-cache"
-        blob.content_type = "application/json"
-        with open(p, "rb") as f:
-            blob.upload_from_file(f, content_type="application/json")
-        print(f"Uploaded gs://{bucket_name}/prod/{name}")
-    else:
-        print(f"Skipping missing {p}")
-PY
+  python scripts/lib/upload_artifacts.py
 fi
 
 if [[ "${RUN_POST_HOOK:-false}" == "true" ]]; then
   echo "Running post_run.py ..."
   python hooks/post_run.py
+fi
+
+# Propagate dbt build failure to Cloud Run
+if [[ "${DBT_EXIT:-0}" -ne 0 ]]; then
+  echo "dbt build had failures; exiting with non-zero status"
+  exit "${DBT_EXIT}"
 fi
 
 echo "Completed at $(date -Is)"

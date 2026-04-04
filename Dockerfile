@@ -20,6 +20,7 @@ RUN mkdir -p seeds snapshots
 COPY seeds/ ./seeds/
 COPY snapshots/ ./snapshots/
 COPY hooks/ ./hooks/
+COPY scripts/lib/ ./scripts/lib/
 
 RUN pip install --no-cache-dir -r requirements.txt
 
