@@ -13,10 +13,30 @@ __pycache__/
 .env
 .envrc
 .direnv/
+infra/
+
+# Secrets — never ship credentials into the container
+keyfile.json
+secrets/
+
+# CI/CD and repo metadata
+.github/
+.git/
+docs/
+docs-viewer/
+
+# Dev tooling
+.devcontainer/
+.vscode/
+.idea/
+.pre-commit-config.yaml
+.sqlfluff
 
 # Editor/OS
 .DS_Store
-# .vscode/
+README.md
+CLAUDE.md
+CHANGELOG.txt
 
 # Docker
 *.log
