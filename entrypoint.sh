@@ -85,9 +85,9 @@ if [[ "${RUN_FRESHNESS}" == "true" ]]; then
   python scripts/lib/freshness_summary.py
 fi
 
-# Emit summary and exit non-zero if dbt had failures
-python scripts/lib/dbt_summary.py
-DBT_EXIT=$?
+# Emit summary; capture exit code without triggering set -e abort
+DBT_EXIT=0
+python scripts/lib/dbt_summary.py || DBT_EXIT=$?
 
 if [[ "${GENERATE_DOCS:-false}" == "true" ]]; then
   dbt ${DBT_NO_COLOR_FLAG} docs generate --static

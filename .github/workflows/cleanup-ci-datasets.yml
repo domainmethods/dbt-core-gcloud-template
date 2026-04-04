@@ -2,8 +2,8 @@ name: cleanup-ci-datasets
 
 on:
   schedule:
-    # Run daily at 04:00 UTC (after nightly prod job at 02:00)
-    - cron: "0 4 * * *"
+    # Run daily at 08:00 UTC (after nightly prod job at 06:00)
+    - cron: "0 8 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
