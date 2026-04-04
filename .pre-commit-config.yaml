@@ -1,3 +1,12 @@
+# Pre-commit hooks for dbt project linting
+#
+# sqlfluff hooks use stages: [manual] to avoid slow runs on every commit.
+# They run automatically in CI (--hook-stage manual) and can be invoked locally via:
+#   pre-commit run --hook-stage manual --all-files     # lint all SQL
+#   pre-commit run --hook-stage manual sqlfluff-fix     # auto-fix all SQL
+#   make lint                                           # shortcut via Makefile
+#
+# yamllint runs on every commit (stages: [pre-commit, manual]).
 repos:
   - repo: https://github.com/sqlfluff/sqlfluff
     rev: 3.4.2
