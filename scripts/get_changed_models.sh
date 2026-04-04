@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Detects which dbt model files changed in this PR vs origin/main.
+# Outputs:
+#   HAS_MODEL_CHANGES=true|false  (to $GITHUB_ENV if available, else stdout)
+#   CHANGED_MODELS=<space-separated model names> (to $GITHUB_OUTPUT or stdout)
+#
+# Requires: git history (fetch-depth: 0 in checkout)
+
+BASE_REF="${BASE_REF:-origin/main}"
+
+echo "=== Detecting changed files vs ${BASE_REF} ==="
+
+# Get list of changed files
+CHANGED_FILES=$(git diff --name-only "${BASE_REF}...HEAD" 2>/dev/null || git diff --name-only "${BASE_REF}" HEAD)
+
+echo "Changed files:"
+echo "$CHANGED_FILES" | sed 's/^/  /'
+
+# Check if any dbt-relevant files changed
+HAS_MODEL_CHANGES=false
+CHANGED_MODELS=""
+
+while IFS= read -r file; do
+  [[ -z "$file" ]] && continue
+  case "$file" in
+    models/*.sql|models/*.yml|models/*.yaml)
+      HAS_MODEL_CHANGES=true
+      # Extract model name from path (e.g., models/staging/stg_foo.sql -> stg_foo)
+      if [[ "$file" == *.sql ]]; then
+        model_name=$(basename "$file" .sql)
+        CHANGED_MODELS="${CHANGED_MODELS} ${model_name}"
+      fi
+      ;;
+    macros/*|seeds/*|snapshots/*|dbt_project.yml|packages.yml)
+      HAS_MODEL_CHANGES=true
+      ;;
+  esac
+done <<< "$CHANGED_FILES"
+
+CHANGED_MODELS=$(echo "$CHANGED_MODELS" | xargs)  # trim whitespace
+
+echo ""
+echo "HAS_MODEL_CHANGES=${HAS_MODEL_CHANGES}"
+echo "CHANGED_MODELS=${CHANGED_MODELS:-<none>}"
+
+# Export to GitHub Actions env/output if available
+if [[ -n "${GITHUB_ENV:-}" ]]; then
+  echo "HAS_MODEL_CHANGES=${HAS_MODEL_CHANGES}" >> "$GITHUB_ENV"
+fi
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+  echo "has_model_changes=${HAS_MODEL_CHANGES}" >> "$GITHUB_OUTPUT"
+  echo "changed_models=${CHANGED_MODELS}" >> "$GITHUB_OUTPUT"
+fi

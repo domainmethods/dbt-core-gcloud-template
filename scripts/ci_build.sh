@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# CI build strategy (4-tier):
+#   1. No model changes detected    → dbt parse only (syntax check)
+#   2. Has state + model changes     → Slim CI (state:modified+ with --defer)
+#   3. Has state, state selection fails → full build (fallback)
+#   4. No state available            → full build
+
 mkdir -p prod_state
 HAS_STATE="false"
 
@@ -17,12 +23,12 @@ if [[ -n "${DBT_ARTIFACTS_BUCKET:-}" ]]; then
       echo "Successfully downloaded manifest (${manifest_size} bytes)"
       if [[ ${manifest_size} -gt 100 ]]; then
         HAS_STATE="true"
-        echo "✓ Slim CI will use state comparison and defer"
+        echo "Slim CI will use state comparison and defer"
       else
-        echo "⚠ Downloaded manifest is too small (${manifest_size} bytes), treating as unavailable"
+        echo "Downloaded manifest is too small (${manifest_size} bytes), treating as unavailable"
       fi
     else
-      echo "⚠ Manifest download failed - file not found after copy"
+      echo "Manifest download failed — file not found after copy"
     fi
   else
     echo "No production manifest found at gs://${DBT_ARTIFACTS_BUCKET}/prod/manifest.json"
@@ -35,16 +41,28 @@ dbt deps
 
 echo ""
 echo "=== dbt Build Strategy ==="
+
+# Tier 1: No model changes → parse only
+if [[ "${HAS_MODEL_CHANGES:-true}" == "false" ]]; then
+  echo "No dbt model changes detected in this PR. Running parse-only validation."
+  dbt parse --target ci
+  echo ""
+  echo "=== Parse Complete (no model changes) ==="
+  exit 0
+fi
+
+# Tier 2-4: Model changes detected, build required
 if [[ "${HAS_STATE}" == "true" ]]; then
   echo "Using Slim CI with state comparison and defer"
   echo "Checking which models dbt detects as changed..."
 
-  # Show what models will be selected (debug output)
   echo "Models selected by state:modified+:"
   dbt ls --select "state:modified+" --state prod_state --resource-type model --output name --target ci || {
-    echo "⚠ Error running dbt ls with state selection, falling back to full build"
+    echo "Error running dbt ls with state selection, falling back to full build"
     echo "Running full build due to state selection error"
     dbt build --target ci
+    echo ""
+    echo "=== Build Complete (full, state selection failed) ==="
     exit $?
   }
 

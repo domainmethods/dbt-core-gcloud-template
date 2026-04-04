@@ -48,6 +48,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Detect changed dbt files
+        id: changes
+        run: bash scripts/get_changed_models.sh
+
       - id: auth
         uses: google-github-actions/auth@v2
         with:
