@@ -15,6 +15,7 @@ env:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    environment: production
     permissions:
       id-token: write
       contents: read
@@ -86,14 +87,14 @@ jobs:
           if ! gcloud scheduler jobs describe "$SCHED" --location "${{ env.SCHED_REGION }}" >/dev/null 2>&1; then
             gcloud scheduler jobs create http "$SCHED" \
               --location "${{ env.SCHED_REGION }}" \
-              --schedule "0 2 * * *" \
+              --schedule "0 6 * * *" \
               --uri "$EXEC_URI" \
               --http-method POST \
               --oauth-service-account-email "${{ secrets.GCP_SCHEDULER_INVOKER_SA }}"
           else
             gcloud scheduler jobs update http "$SCHED" \
               --location "${{ env.SCHED_REGION }}" \
-              --schedule "0 2 * * *" \
+              --schedule "0 6 * * *" \
               --uri "$EXEC_URI" \
               --http-method POST \
               --oauth-service-account-email "${{ secrets.GCP_SCHEDULER_INVOKER_SA }}"
@@ -101,5 +102,6 @@ jobs:
 
       - name: Run prod job now and ensure artifacts pushed
         run: |
-          gcloud run jobs execute dbt-prod-run --region "${{ env.REGION }}" --wait || true
-          # The container uploads manifest/run_results/docs to gs://${{ secrets.DBT_ARTIFACTS_BUCKET }}/prod/
+          echo "Executing dbt-prod-run and waiting for completion..."
+          gcloud run jobs execute dbt-prod-run --region "${{ env.REGION }}" --wait
+          echo "Job execution completed successfully."
