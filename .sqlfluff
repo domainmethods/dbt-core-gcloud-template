@@ -2,8 +2,14 @@
 dialect = bigquery
 templater = dbt
 max_line_length = 120
+# BigQuery-specific exclusions:
+# RF02: flags qualified column refs (standard BQ pattern)
+# ST06: reorders SELECT columns (opinionated, breaks intended order)
+# ST07: flags CTE usage patterns valid in BQ
+# AM03: flags ORDER BY position references (common BQ idiom)
+# JJ01: flags Jinja spacing (conflicts with dbt style)
+exclude_rules = RF02,ST06,ST07,AM03,JJ01
 
 [sqlfluff:templater:dbt]
 project_dir = .
 profiles_dir = profiles
-
