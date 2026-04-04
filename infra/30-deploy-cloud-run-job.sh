@@ -129,6 +129,8 @@ gcloud run jobs deploy dbt-prod-run \
   --parallelism=1 \
   --max-retries=1 \
   --task-timeout=3600s \
+  --memory=2Gi \
+  --cpu=1 \
   --set-env-vars="${ENV_VARS}" \
   --project "${PROJECT_ID}"
 
