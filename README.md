@@ -160,6 +160,8 @@ gcloud auth login
 gcloud auth application-default login
 ```
 
+> **Why both?** `gcloud auth login` authenticates the gcloud CLI tools (bq, gsutil). `gcloud auth application-default login` creates Application Default Credentials (ADC) that Python libraries like dbt-bigquery use.
+
 #### Step 4: Load Environment
 
 ```bash
