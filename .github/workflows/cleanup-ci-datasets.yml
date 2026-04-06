@@ -1,0 +1,42 @@
+name: cleanup-ci-datasets
+
+on:
+  schedule:
+    # Run daily at 04:00 UTC (after nightly prod job at 02:00)
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (true = list only, no deletes)"
+        required: false
+        default: "false"
+      max_age_hours:
+        description: "Delete datasets older than N hours"
+        required: false
+        default: "24"
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_CI_SA_EMAIL }}
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Cleanup orphaned CI datasets
+        env:
+          DBT_GCP_PROJECT_CI: ${{ secrets.GCP_PROJECT_CI }}
+          MAX_AGE_HOURS: ${{ github.event.inputs.max_age_hours || '24' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: bash scripts/cleanup_ci_datasets.sh

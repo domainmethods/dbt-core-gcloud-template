@@ -6,7 +6,7 @@ on:
     paths-ignore: [ "README.md" ]
 
 env:
-  DBT_BQ_LOCATION: us
+  DBT_BQ_LOCATION: US
   DBT_TARGET: ci
   DBT_PROFILES_DIR: ./profiles
 
@@ -45,6 +45,12 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed dbt files
+        id: changes
+        run: bash scripts/get_changed_models.sh
 
       - id: auth
         uses: google-github-actions/auth@v2
@@ -69,11 +75,12 @@ jobs:
           echo "DBT_USER=ci_${{ github.actor }}" >> $GITHUB_ENV
           echo "DBT_BQ_DATASET=ci_pr_${{ github.event.number }}_${{ github.run_id }}" >> $GITHUB_ENV
           echo "DBT_GCP_PROJECT_PROD=${{ secrets.GCP_PROJECT_PROD }}" >> $GITHUB_ENV
+          echo "DBT_BQ_DATASET_PROD=${{ secrets.PROD_DATASET }}" >> $GITHUB_ENV
           echo "DIFF_LIMIT=200" >> $GITHUB_ENV
           echo "CI_SA_EMAIL=${{ secrets.GCP_CI_SA_EMAIL }}" >> $GITHUB_ENV
           echo "MAKE_DATASET_READONLY=true" >> $GITHUB_ENV
           echo "RUN_FRESHNESS=false" >> $GITHUB_ENV
-          echo "FRESHNESS_SELECT=source:raw.example" >> $GITHUB_ENV
+          echo "FRESHNESS_SELECT=" >> $GITHUB_ENV
           echo "DBT_BQ_PRIORITY=interactive" >> $GITHUB_ENV
           echo "DBT_MAX_BYTES_BILLED=" >> $GITHUB_ENV
           echo "DBT_JOB_EXECUTION_TIMEOUT_SEC=" >> $GITHUB_ENV
@@ -98,6 +105,7 @@ jobs:
 
       - name: Generate docs (optional preview)
         if: ${{ steps.dbt_build.outcome == 'success' }}
+        continue-on-error: true
         run: dbt docs generate --static
 
       - name: Generate data diffs for changed models

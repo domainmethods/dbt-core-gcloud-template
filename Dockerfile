@@ -5,13 +5,22 @@ FROM ghcr.io/dbt-labs/dbt-core:1.10.8
 RUN pip install "dbt-bigquery==1.10.1"
 
 WORKDIR /app
+
+# Python hooks may import from /app; ensure it's on the path
+ENV PYTHONPATH=/app
 ENV DBT_PROFILES_DIR=/app/profiles
 
-# Copy core project files and directories needed at runtime (exclude CI scripts)
-COPY dbt_project.yml packages.yml macros/ models/ hooks/ ./
-# Copy profiles into the expected directory
-COPY profiles/ /app/profiles/
-COPY requirements.txt ./
+# Copy core project files needed at runtime
+COPY dbt_project.yml packages.yml requirements.txt ./
+COPY profiles/ ./profiles/
+COPY macros/ ./macros/
+COPY models/ ./models/
+# seeds/ and snapshots/ are optional — ensure dirs exist for COPY
+RUN mkdir -p seeds snapshots
+COPY seeds/ ./seeds/
+COPY snapshots/ ./snapshots/
+COPY hooks/ ./hooks/
+
 RUN pip install --no-cache-dir -r requirements.txt
 
 ENV DBT_TARGET=prod

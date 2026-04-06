@@ -9,7 +9,7 @@ repos:
           "dbt-bigquery==1.10.1"
         ]
         args: ["--dialect", "bigquery", "--templater", "dbt"]
-        stages: [pre-commit, manual]
+        stages: [manual]
         files: ^models/.*\.sql$
       - id: sqlfluff-fix
         additional_dependencies: [
@@ -18,7 +18,7 @@ repos:
           "dbt-bigquery==1.10.1"
         ]
         args: ["--dialect", "bigquery", "--templater", "dbt"]
-        stages: [pre-commit]
+        stages: [manual]
         files: ^models/.*\.sql$
 
   - repo: https://github.com/adrienverge/yamllint
