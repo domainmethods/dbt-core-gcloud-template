@@ -45,7 +45,7 @@ jobs:
           docker run --rm --entrypoint sh "$IMAGE_URI" -c "
             set -e
             echo 'Checking directory structure...'
-            for d in hooks macros models seeds snapshots profiles; do
+            for d in hooks macros models profiles; do
               [ -d \"/app/\$d\" ] || { echo \"FAIL: /app/\$d missing\"; exit 1; }
             done
             echo 'Checking dbt is importable...'

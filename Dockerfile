@@ -15,6 +15,8 @@ COPY dbt_project.yml packages.yml requirements.txt ./
 COPY profiles/ ./profiles/
 COPY macros/ ./macros/
 COPY models/ ./models/
+# seeds/ and snapshots/ are optional — ensure dirs exist for COPY
+RUN mkdir -p seeds snapshots
 COPY seeds/ ./seeds/
 COPY snapshots/ ./snapshots/
 COPY hooks/ ./hooks/

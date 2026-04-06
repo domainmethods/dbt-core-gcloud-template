@@ -24,19 +24,16 @@ CHANGED_MODELS=""
 
 while IFS= read -r file; do
   [[ -z "$file" ]] && continue
-  case "$file" in
-    models/*.sql|models/*.yml|models/*.yaml)
-      HAS_MODEL_CHANGES=true
-      # Extract model name from path (e.g., models/staging/stg_foo.sql -> stg_foo)
-      if [[ "$file" == *.sql ]]; then
-        model_name=$(basename "$file" .sql)
-        CHANGED_MODELS="${CHANGED_MODELS} ${model_name}"
-      fi
-      ;;
-    macros/*|seeds/*|snapshots/*|dbt_project.yml|packages.yml)
-      HAS_MODEL_CHANGES=true
-      ;;
-  esac
+  if [[ "$file" =~ ^models/.*\.(sql|yml|yaml)$ ]]; then
+    HAS_MODEL_CHANGES=true
+    # Extract model name from path (e.g., models/staging/stg_foo.sql -> stg_foo)
+    if [[ "$file" == *.sql ]]; then
+      model_name=$(basename "$file" .sql)
+      CHANGED_MODELS="${CHANGED_MODELS} ${model_name}"
+    fi
+  elif [[ "$file" =~ ^(macros|seeds|snapshots)/ || "$file" == "dbt_project.yml" || "$file" == "packages.yml" ]]; then
+    HAS_MODEL_CHANGES=true
+  fi
 done <<< "$CHANGED_FILES"
 
 CHANGED_MODELS=$(echo "$CHANGED_MODELS" | xargs)  # trim whitespace

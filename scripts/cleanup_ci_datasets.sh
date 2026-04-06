@@ -52,7 +52,7 @@ while IFS= read -r dataset_id; do
   else
     skipped=$((skipped + 1))
   fi
-done < <(bq ls --project_id="$PROJECT" --format=json --max_results=1000 2>/dev/null \
+done < <(bq ls --project_id="$PROJECT" --format=json --max_results=10000 2>/dev/null \
   | python3 -c "
 import sys, json
 try:
