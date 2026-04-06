@@ -42,7 +42,7 @@ dbt run-operation dev_prod_diff --args '{"table_name":"fct_example"}'
 
 ## Linting
 
-sqlfluff runs in **manual stage** (not on every commit) to avoid slow feedback loops:
+sqlfluff runs on **pre-push** (not on every commit) to catch lint issues before they reach the remote:
 
 ```bash
 make lint                                    # Recommended: run via Makefile
