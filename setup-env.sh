@@ -65,7 +65,14 @@ if [[ -f "infra/.env" ]]; then
     echo "${PREFIX} Environment persisted to ~/.bashrc"
   fi
 else
-  echo "${PREFIX} Warning: infra/.env not found. Copy from infra/.env.example and configure."
+  echo ""
+  echo "${PREFIX} ERROR: infra/.env not found."
+  echo "${PREFIX}   1. cp infra/.env.example infra/.env"
+  echo "${PREFIX}   2. Edit infra/.env with your GCP project details"
+  echo "${PREFIX}   3. Re-run: source ./setup-env.sh"
+  echo ""
+  # Return 1 (not exit) so 'source ./setup-env.sh' doesn't kill the shell
+  return 1 2>/dev/null || exit 1
 fi
 
 echo "${PREFIX} Environment ready! DBT_USER=${DBT_USER}, DBT_PROFILES_DIR=${DBT_PROFILES_DIR}"

@@ -36,24 +36,27 @@ rm -f "$TMP_RUN_POLICY"
 
 echo "== Ensure Cloud Scheduler job (runs daily at 06:00 UTC) =="
 echo "[info] Using Scheduler region: ${SCHED_REGION}, Cloud Run region: ${REGION}"
+
+# Common scheduler args: retry on transient failures
+SCHED_ARGS=(
+  --location "${SCHED_REGION}"
+  --schedule="0 6 * * *"
+  --http-method=POST
+  --uri="https://run.googleapis.com/v2/projects/${PROJECT_ID}/locations/${REGION}/jobs/dbt-prod-run:run"
+  --oauth-service-account-email "${SCHED_SA_EMAIL}"
+  --oauth-token-scope "https://www.googleapis.com/auth/cloud-platform"
+  --project "${PROJECT_ID}"
+  --attempt-deadline=600s
+  --max-retry-duration=1800s
+  --min-backoff=30s
+  --max-backoff=300s
+  --max-doublings=3
+)
+
 if gcloud scheduler jobs describe dbt-prod-nightly --location "${SCHED_REGION}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
-  gcloud scheduler jobs update http dbt-prod-nightly \
-    --location "${SCHED_REGION}" \
-    --schedule="0 6 * * *" \
-    --http-method=POST \
-    --uri="https://run.googleapis.com/v2/projects/${PROJECT_ID}/locations/${REGION}/jobs/dbt-prod-run:run" \
-    --oauth-service-account-email "${SCHED_SA_EMAIL}" \
-    --oauth-token-scope "https://www.googleapis.com/auth/cloud-platform" \
-    --project "${PROJECT_ID}"
+  gcloud scheduler jobs update http dbt-prod-nightly "${SCHED_ARGS[@]}"
 else
-  gcloud scheduler jobs create http dbt-prod-nightly \
-    --location "${SCHED_REGION}" \
-    --schedule="0 6 * * *" \
-    --http-method=POST \
-    --uri="https://run.googleapis.com/v2/projects/${PROJECT_ID}/locations/${REGION}/jobs/dbt-prod-run:run" \
-    --oauth-service-account-email "${SCHED_SA_EMAIL}" \
-    --oauth-token-scope "https://www.googleapis.com/auth/cloud-platform" \
-    --project "${PROJECT_ID}"
+  gcloud scheduler jobs create http dbt-prod-nightly "${SCHED_ARGS[@]}"
 fi
 
 echo "Scheduler configured."

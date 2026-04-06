@@ -160,6 +160,8 @@ gcloud auth login
 gcloud auth application-default login
 ```
 
+> **Why both?** `gcloud auth login` authenticates the gcloud CLI tools (bq, gsutil). `gcloud auth application-default login` creates Application Default Credentials (ADC) that Python libraries like dbt-bigquery use.
+
 #### Step 4: Load Environment
 
 ```bash
@@ -467,7 +469,7 @@ The sections above provide quick-start guides. For detailed reference:
 
 * Configure variables in `infra/.env` (copied from `infra/.env.example`)
 * `setup-env.sh` loads `infra/.env`, sets `DBT_PROFILES_DIR=profiles`, and generates `DBT_USER` from your gcloud email
-* Ensure the profile name in `profiles/profiles.yml` matches `dbt_project.yml` (profile: `domainmethods`)
+* Ensure the profile name in `profiles/profiles.yml` matches `dbt_project.yml` (profile: `dbt_gcloud`)
 
 **Environment Variables:**
 

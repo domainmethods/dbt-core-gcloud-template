@@ -99,10 +99,11 @@ node_to_fqn() {
 }
 
 # Helper: safe bq query to JSON; echoes JSON or empty and returns non-zero on error
+# Cap at 1GB scanned to prevent runaway costs on INFORMATION_SCHEMA queries
 bq_json() {
   local project=$1 sql=$2
   local out
-  out=$(bq --project_id="$project" query --nouse_legacy_sql --format=json "$sql" 2>&1) || {
+  out=$(bq --project_id="$project" query --nouse_legacy_sql --format=json --maximum_bytes_billed=1000000000 "$sql" 2>&1) || {
     echo "$out" >&2
     return 1
   }

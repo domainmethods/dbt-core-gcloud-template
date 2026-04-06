@@ -15,23 +15,27 @@ echo "DBT_ARTIFACTS_BUCKET: ${DBT_ARTIFACTS_BUCKET:-<unset>}"
 echo "Checking for production manifest at: gs://${DBT_ARTIFACTS_BUCKET:-<unset>}/prod/manifest.json"
 
 if [[ -n "${DBT_ARTIFACTS_BUCKET:-}" ]]; then
-  if gsutil ls "gs://${DBT_ARTIFACTS_BUCKET}/prod/manifest.json" >/dev/null 2>&1; then
-    echo "Production manifest found, downloading..."
-    gsutil cp "gs://${DBT_ARTIFACTS_BUCKET}/prod/manifest.json" prod_state/manifest.json
-    if [[ -f prod_state/manifest.json ]]; then
-      manifest_size=$(wc -c < prod_state/manifest.json)
-      echo "Successfully downloaded manifest (${manifest_size} bytes)"
-      if [[ ${manifest_size} -gt 100 ]]; then
-        HAS_STATE="true"
-        echo "Slim CI will use state comparison and defer"
-      else
-        echo "Downloaded manifest is too small (${manifest_size} bytes), treating as unavailable"
-      fi
+  echo "Checking for production manifest..."
+  for attempt in 1 2 3; do
+    if gsutil ls "gs://${DBT_ARTIFACTS_BUCKET}/prod/manifest.json" >/dev/null 2>&1; then
+      gsutil cp "gs://${DBT_ARTIFACTS_BUCKET}/prod/manifest.json" prod_state/manifest.json && break
+    fi
+    if [[ $attempt -lt 3 ]]; then
+      echo "Attempt $attempt failed, retrying in $((2 ** attempt))s..."
+      sleep $((2 ** attempt))
+    fi
+  done
+  if [[ -f prod_state/manifest.json ]]; then
+    # Validate JSON structure (not just file size)
+    if python3 -c "import json; json.load(open('prod_state/manifest.json'))" 2>/dev/null; then
+      HAS_STATE="true"
+      echo "Valid production manifest downloaded; Slim CI will use state comparison and defer"
     else
-      echo "Manifest download failed — file not found after copy"
+      echo "Downloaded manifest is not valid JSON, treating as unavailable"
+      rm -f prod_state/manifest.json
     fi
   else
-    echo "No production manifest found at gs://${DBT_ARTIFACTS_BUCKET}/prod/manifest.json"
+    echo "Manifest download failed after 3 attempts"
   fi
 else
   echo "DBT_ARTIFACTS_BUCKET not set, skipping production manifest download"

@@ -1,3 +1,12 @@
+# Pre-commit hooks for dbt project linting
+#
+# sqlfluff hooks run on pre-push to catch lint issues before they reach the remote
+# without slowing down individual commits. They can also be invoked locally via:
+#   pre-commit run --hook-stage pre-push --all-files    # lint all SQL
+#   pre-commit run --hook-stage manual sqlfluff-fix     # auto-fix all SQL
+#   make lint                                           # shortcut via Makefile
+#
+# yamllint runs on every commit (stages: [pre-commit, manual]).
 repos:
   - repo: https://github.com/sqlfluff/sqlfluff
     rev: 3.4.2
@@ -9,7 +18,7 @@ repos:
           "dbt-bigquery==1.10.1"
         ]
         args: ["--dialect", "bigquery", "--templater", "dbt"]
-        stages: [manual]
+        stages: [pre-push, manual]
         files: ^models/.*\.sql$
       - id: sqlfluff-fix
         additional_dependencies: [
@@ -18,7 +27,7 @@ repos:
           "dbt-bigquery==1.10.1"
         ]
         args: ["--dialect", "bigquery", "--templater", "dbt"]
-        stages: [manual]
+        stages: [pre-push, manual]
         files: ^models/.*\.sql$
 
   - repo: https://github.com/adrienverge/yamllint
