@@ -4,7 +4,7 @@ set -euo pipefail
 # Create or ensure a developer BigQuery dataset and dataset-level IAM.
 # Usage: create-dev-dataset.sh <email> [dataset] [--grant-job-user]
 #
-# - If [dataset] is omitted, defaults to "${PROD_DATASET}_${short}", where
+# - If [dataset] is omitted, defaults to "analytics_${short}", where
 #   short is the email local-part lowercased with non-alnum replaced by '_'.
 # - Grants roles/bigquery.dataEditor on the dataset to the user.
 # - Grants roles/bigquery.dataViewer on the dataset to CI and Prod service accounts.
@@ -40,7 +40,7 @@ command -v jq >/dev/null || { echo "jq not found"; exit 1; }
 # Derive default dataset name if not provided
 localpart="${DEV_EMAIL%@*}"
 short=$(printf '%s' "$localpart" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g')
-DEV_DS="${REQ_DATASET:-${PROD_DATASET}_${short}}"
+DEV_DS="${REQ_DATASET:-analytics_${short}}"
 
 info(){ echo "[info] $*"; }
 

@@ -76,6 +76,7 @@ Push to `main` triggers: Docker build → push to Artifact Registry → update C
 Numbered shell scripts run in order for initial GCP setup: bootstrap → WIF → GitHub secrets → Cloud Run Job → Cloud Scheduler → docs hosting → monitoring. All read from `infra/.env`.
 
 ### Key Macros
+- `macros/guard_dev_environment.sql` — `on-run-start` hook that blocks `--target prod` locally (only CI/CD where `CI=true` or `GITHUB_ACTIONS=true` can deploy to prod). Warns on missing `DBT_USER` in dev target.
 - `macros/compare_dev_prod.sql` — `dev_prod_diff` macro for row-level dev-vs-prod comparison using `EXCEPT DISTINCT`
 - `macros/generate_schema_name.sql` — Controls dataset naming; appends custom schema suffix if specified
 
@@ -90,7 +91,7 @@ Numbered shell scripts run in order for initial GCP setup: bootstrap → WIF →
 ## Environment Variables
 
 Key variables loaded from `infra/.env`:
-- `DBT_GCP_PROJECT_DEV` / `DBT_GCP_PROJECT_PROD` / `DBT_GCP_PROJECT_CI` — GCP project IDs per environment
+- `DBT_GCP_PROJECT_DEV` / `DBT_GCP_PROJECT_PROD` / `DBT_GCP_PROJECT_CI` — GCP project IDs per environment (CI/prod have safe defaults in profiles.yml so dbt can parse all targets locally)
 - `DBT_BQ_DATASET_PROD` — Production dataset (default: `analytics`)
 - `DBT_ARTIFACTS_BUCKET` — GCS bucket for manifest/run_results (enables Slim CI)
 - `DBT_DOCS_BUCKET` — GCS bucket for static docs site
