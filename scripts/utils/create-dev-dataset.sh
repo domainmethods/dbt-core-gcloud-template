@@ -15,6 +15,9 @@ cd "$ROOT_DIR"
 
 source infra/.env
 
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
 if [[ $# -lt 1 ]]; then
   echo "Usage: $0 <developer_email> [dataset] [--grant-job-user]" >&2
   exit 1
@@ -54,11 +57,11 @@ fi
 
 add_ds () {
   local dataset="$1" role="$2" member="$3"
-  local tmp="$(mktemp)"
+  local tmp="${TMP_DIR}/ds_old.json"
+  local tmp2="${TMP_DIR}/ds_new.json"
   if ! bq get-iam-policy --format=prettyjson "${PROJECT_ID}:${dataset}" > "${tmp}" 2>/dev/null; then
     echo '{"bindings":[],"version":1}' > "${tmp}"
   fi
-  local tmp2="${tmp}.new"
   jq --arg role "${role}" --arg member "${member}" '
     .bindings |= (. // []) |
     if any(.bindings[]?; .role==$role) then
@@ -73,7 +76,6 @@ add_ds () {
   else
     info "Dataset IAM already set: ${dataset} ${role} has ${member}"
   fi
-  rm -f "${tmp}" "${tmp2}"
 }
 
 add_ds "${DEV_DS}" "roles/bigquery.dataEditor" "user:${DEV_EMAIL}"
@@ -84,9 +86,7 @@ add_ds "${DEV_DS}" "roles/bigquery.dataViewer" "serviceAccount:${CI_SA_EMAIL}"
 add_ds "${DEV_DS}" "roles/bigquery.dataViewer" "serviceAccount:${PROD_SA_EMAIL}"
 
 if (( GRANT_JOB_USER == 1 )); then
-  tmp="$(mktemp)"
-  gcloud projects get-iam-policy "${PROJECT_ID}" --format=json >"$tmp"
-  if jq -e --arg m "user:${DEV_EMAIL}" '.bindings[]? | select(.role=="roles/bigquery.jobUser") | .members[]? | select(.==$m)' "$tmp" >/dev/null; then
+  if gcloud projects get-iam-policy "${PROJECT_ID}" --format=json | jq -e --arg m "user:${DEV_EMAIL}" '.bindings[]? | select(.role=="roles/bigquery.jobUser") | .members[]? | select(.==$m)' >/dev/null 2>&1; then
     info "Project IAM already set: roles/bigquery.jobUser -> user:${DEV_EMAIL}"
   else
     info "Granting roles/bigquery.jobUser to user:${DEV_EMAIL}"
@@ -94,8 +94,6 @@ if (( GRANT_JOB_USER == 1 )); then
       --member="user:${DEV_EMAIL}" \
       --role="roles/bigquery.jobUser" >/dev/null
   fi
-  rm -f "$tmp"
 fi
 
 echo "Created/updated dev dataset ${DEV_DS} for ${DEV_EMAIL}."
-
