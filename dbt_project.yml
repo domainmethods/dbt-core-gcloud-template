@@ -3,6 +3,9 @@ version: 1.0.0
 require-dbt-version: ">=1.10.0,<2.0.0"
 profile: dbt_gcloud
 
+on-run-start:
+  - "{{ guard_dev_environment() }}"
+
 model-paths: ["models"]
 macro-paths: ["macros"]
 seed-paths: ["seeds"]

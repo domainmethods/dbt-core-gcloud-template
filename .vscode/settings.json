@@ -1,0 +1,20 @@
+{
+    "terminal.integrated.env.linux": {
+        "DBT_PROFILES_DIR": "profiles",
+        "DBT_TARGET": "dev",
+        "DBT_GCP_PROJECT_DEV": "your-gcp-project-id",
+        "DBT_BQ_LOCATION": "US"
+    },
+    "terminal.integrated.env.osx": {
+        "DBT_PROFILES_DIR": "profiles",
+        "DBT_TARGET": "dev",
+        "DBT_GCP_PROJECT_DEV": "your-gcp-project-id",
+        "DBT_BQ_LOCATION": "US"
+    },
+    "terminal.integrated.env.windows": {
+        "DBT_PROFILES_DIR": "profiles",
+        "DBT_TARGET": "dev",
+        "DBT_GCP_PROJECT_DEV": "your-gcp-project-id",
+        "DBT_BQ_LOCATION": "US"
+    }
+}
