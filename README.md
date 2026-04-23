@@ -485,7 +485,7 @@ DBT_BQ_LOCATION=US
 # DBT_JOB_EXECUTION_TIMEOUT_SEC=
 ```
 
-> Tip: Use a per‑developer dataset like `${PROD_DATASET}_${DBT_USER}` so multiple engineers never collide. Per‑developer schemas/datasets are a common pattern. ([Datafold][1])
+> Tip: Use a per‑developer dataset like `analytics_${DBT_USER}` so multiple engineers never collide. Per‑developer schemas/datasets are a common pattern. ([Datafold][1])
 
 **Documentation Generation:**
 
@@ -506,7 +506,7 @@ Option A — ad‑hoc SQL in BigQuery UI:
 
 Option B — parameterized macro or helper:
 
-* Export `DBT_USER` so the chosen naming (`${PROD_DATASET}_${DBT_USER}`) is stable in dev.
+* Export `DBT_USER` so the chosen naming (`analytics_${DBT_USER}`) is stable in dev.
 * Run one of:
 
 ```
@@ -883,7 +883,7 @@ Notes
 ## Next Steps
 
 * Replace placeholder IDs in workflows and `infra/.env`.
-* Decide on the dataset naming convention. This template uses `${PROD_DATASET}_${DBT_USER}` for dev by default.
+* Decide on the dataset naming convention. This template uses `analytics_${DBT_USER}` for dev by default.
 * Add models/tests and any packages to `packages.yml`.
 * Consider a formal **data diff** step in CI to compare dev vs prod tables on changed models. ([Datafold][6])
 

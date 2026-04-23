@@ -8,6 +8,9 @@ command -v gcloud >/dev/null || { echo "gcloud not found"; exit 1; }
 command -v bq >/dev/null || { echo "bq not found"; exit 1; }
 command -v jq >/dev/null || { echo "jq not found"; exit 1; }
 
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
 # Helpers
 info(){ echo "[info] $*"; }
 warn(){ echo "[warn] $*"; }
@@ -41,17 +44,12 @@ ensure_bucket(){
   local name="${DBT_DOCS_BUCKET}"
   local uri="gs://${name}"
   # First, try to describe. If it exists and we have access, we're done.
-  local err_file
-  err_file="$(mktemp)"
-  if gcloud storage buckets describe "$uri" --project "$PROJECT_ID" >/dev/null 2>"$err_file"; then
+  local err_msg
+  if err_msg="$(gcloud storage buckets describe "$uri" --project "$PROJECT_ID" 2>&1 >/dev/null)"; then
     info "Bucket exists: $uri"
-    rm -f "$err_file"
     return 0
   fi
   # If describe failed with 403, it's very likely the name is already taken by another project.
-  local err_msg
-  err_msg="$(cat "$err_file" 2>/dev/null || true)"
-  rm -f "$err_file"
   if [[ "$err_msg" == *"HttpError 403"* || "$err_msg" == *"Permission denied"* || "$err_msg" == *"AccessDenied"* || "$err_msg" == *"does not have storage.buckets.get"* ]]; then
     echo "[error] Bucket name '${name}' appears to be in use (403 on describe)." >&2
     echo "        GCS bucket names are global. Please set DBT_DOCS_BUCKET to a unique value" >&2
@@ -78,14 +76,11 @@ ensure_bucket(){
 ensure_bucket_named(){
   local name="$1"
   local uri="gs://${name}"
-  local err_file err_msg create_out rc
-  err_file="$(mktemp)"
-  if gcloud storage buckets describe "$uri" --project "$PROJECT_ID" >/dev/null 2>"$err_file"; then
+  local err_msg create_out rc
+  if err_msg="$(gcloud storage buckets describe "$uri" --project "$PROJECT_ID" 2>&1 >/dev/null)"; then
     info "Bucket exists: $uri"
-    rm -f "$err_file"
     return 0
   fi
-  err_msg="$(cat "$err_file" 2>/dev/null || true)"; rm -f "$err_file"
   if [[ "$err_msg" == *"HttpError 403"* || "$err_msg" == *"Permission denied"* || "$err_msg" == *"AccessDenied"* || "$err_msg" == *"does not have storage.buckets.get"* ]]; then
     echo "[error] Bucket name '${name}' appears to be in use (403 on describe)." >&2
     echo "        GCS bucket names are global. Please set a unique name and re-run." >&2
@@ -106,15 +101,15 @@ ensure_bucket_named(){
 }
 ensure_dataset(){ local ds="$1" desc="$2"; if bq --location="$BQ_LOCATION" show --format=none "${PROJECT_ID}:${ds}" >/dev/null 2>&1; then info "Dataset exists: ${ds}"; else info "Creating dataset: ${ds}"; bq --location="$BQ_LOCATION" mk -d --description "$desc" "${PROJECT_ID}:${ds}"; fi }
 
-ensure_project_binding(){ local role="$1" member="$2"; local policy tmp; tmp="$(mktemp)"; gcloud projects get-iam-policy "$PROJECT_ID" --format=json >"$tmp"; if jq -e --arg r "$role" --arg m "$member" '.bindings[]? | select(.role==$r) | .members[]? | select(.==$m)' "$tmp" >/dev/null; then info "Project IAM binding exists: $role -> $member"; else info "Adding project IAM binding: $role -> $member"; gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="$member" --role="$role" --quiet >/dev/null; fi; rm -f "$tmp"; }
+ensure_project_binding(){ local role="$1" member="$2"; if gcloud projects get-iam-policy "$PROJECT_ID" --format=json | jq -e --arg r "$role" --arg m "$member" '.bindings[]? | select(.role==$r) | .members[]? | select(.==$m)' >/dev/null 2>&1; then info "Project IAM binding exists: $role -> $member"; else info "Adding project IAM binding: $role -> $member"; gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="$member" --role="$role" --quiet >/dev/null; fi; }
 
 add_dataset_binding () {
   local dataset="$1" role="$2" member="$3"
-  local tmp="$(mktemp)"
+  local tmp="${TMP_DIR}/ds_iam_old.json"
   if ! bq --project_id="${PROJECT_ID}" get-iam-policy --format=prettyjson "${PROJECT_ID}:${dataset}" > "${tmp}" 2>/dev/null; then
     echo '{"bindings":[],"version":1}' > "${tmp}"
   fi
-  local tmp2="${tmp}.new"
+  local tmp2="${TMP_DIR}/ds_iam_new.json"
   jq --arg role "${role}" --arg member "${member}" '
     .bindings |= (. // []) |
     if any(.bindings[]?; .role==$role) then
@@ -147,7 +142,7 @@ add_dataset_binding () {
         fi
         if [[ -n "$ent_key" && -n "$ent_val" ]]; then
           local ds_tmp ds_new
-          ds_tmp="$(mktemp)"; ds_new="$(mktemp)"
+          ds_tmp="${TMP_DIR}/ds_acl_old.json"; ds_new="${TMP_DIR}/ds_acl_new.json"
           if bq --project_id="${PROJECT_ID}" show --format=prettyjson "${dataset}" >"$ds_tmp" 2>/dev/null; then
             jq --arg role "$acl_role" --arg key "$ent_key" --arg val "$ent_val" '
               .access = ((.access // []) + [{($key): $val, role: $role}])
@@ -165,7 +160,6 @@ add_dataset_binding () {
           else
             warn "Failed to fetch dataset ${PROJECT_ID}:${dataset} for ACL fallback."
           fi
-          rm -f "$ds_tmp" "$ds_new"
         else
           warn "Unsupported member for ACL fallback: ${member}"
         fi
@@ -176,7 +170,6 @@ add_dataset_binding () {
   else
     info "Dataset IAM already set: ${dataset} ${role} has ${member}"
   fi
-  rm -f "${tmp}" "${tmp2}"
 }
 
 # Harden dataset ACLs so that only the specified writer_email has WRITER; all others get no write.
@@ -184,10 +177,9 @@ add_dataset_binding () {
 harden_dataset_acl_writer_only() {
   local dataset="$1" writer_email="$2"
   local ds_tmp ds_new
-  ds_tmp="$(mktemp)"; ds_new="$(mktemp)"
+  ds_tmp="${TMP_DIR}/harden_old.json"; ds_new="${TMP_DIR}/harden_new.json"
   if ! bq --project_id="${PROJECT_ID}" show --format=prettyjson "${dataset}" >"$ds_tmp" 2>/dev/null; then
     warn "Failed to fetch dataset ${PROJECT_ID}:${dataset} for ACL hardening"
-    rm -f "$ds_tmp" "$ds_new"
     return 0
   fi
   jq --arg writer "$writer_email" '
@@ -211,17 +203,16 @@ harden_dataset_acl_writer_only() {
   else
     info "ACLs already hardened for ${dataset}"
   fi
-  rm -f "$ds_tmp" "$ds_new"
 }
 
 # Ensure a member has a role on a GCS bucket via get-modify-set flow (idempotent)
 ensure_bucket_binding () {
   local bucket="$1" role="$2" member="$3"
-  local tmp="$(mktemp)"
+  local tmp="${TMP_DIR}/bkt_iam_old.json"
   if ! gcloud storage buckets get-iam-policy "gs://${bucket}" --format=json --project "${PROJECT_ID}" > "${tmp}" 2>/dev/null; then
     echo '{"bindings":[],"version":3}' > "${tmp}"
   fi
-  local tmp2="${tmp}.new"
+  local tmp2="${TMP_DIR}/bkt_iam_new.json"
   jq --arg role "${role}" --arg member "${member}" '
     .bindings = (.bindings // []) |
     if any(.bindings[]?; .role==$role) then
@@ -248,7 +239,6 @@ ensure_bucket_binding () {
   else
     info "Bucket IAM already set: gs://${bucket} ${role} has ${member}"
   fi
-  rm -f "${tmp}" "${tmp2}"
 }
 
 require_env PROJECT_ID PROJECT_NUMBER REGION BQ_LOCATION AR_REPO PROD_DATASET DBT_DOCS_BUCKET CI_SA_ID PROD_SA_ID SCHEDULER_SA_ID
@@ -314,9 +304,7 @@ ensure_project_binding roles/cloudscheduler.admin "serviceAccount:${PROD_SA_EMAI
 
 # Permit the deployer identity to set the runtime service account when deploying the job
 # (required by Cloud Run to use --service-account). Here we allow the PROD SA to act as itself.
-TMP_SA_POLICY="$(mktemp)"
-gcloud iam service-accounts get-iam-policy "${PROD_SA_EMAIL}" --format=json --project "${PROJECT_ID}" >"${TMP_SA_POLICY}"
-if ! jq -e --arg m "serviceAccount:${PROD_SA_EMAIL}" '.bindings[]? | select(.role=="roles/iam.serviceAccountUser") | .members[]? | select(.==$m)' "${TMP_SA_POLICY}" >/dev/null; then
+if ! gcloud iam service-accounts get-iam-policy "${PROD_SA_EMAIL}" --format=json --project "${PROJECT_ID}" | jq -e --arg m "serviceAccount:${PROD_SA_EMAIL}" '.bindings[]? | select(.role=="roles/iam.serviceAccountUser") | .members[]? | select(.==$m)' >/dev/null 2>&1; then
   info "Granting roles/iam.serviceAccountUser on ${PROD_SA_EMAIL} to itself (for --service-account)"
   gcloud iam service-accounts add-iam-policy-binding "${PROD_SA_EMAIL}" \
     --member "serviceAccount:${PROD_SA_EMAIL}" \
@@ -325,7 +313,6 @@ if ! jq -e --arg m "serviceAccount:${PROD_SA_EMAIL}" '.bindings[]? | select(.rol
 else
   info "Service account user binding already present on ${PROD_SA_EMAIL}"
 fi
-rm -f "${TMP_SA_POLICY}"
 
 # Optionally allow the human operator to set the runtime service account during deploys
 # Determine operator principal from either OPERATOR_EMAIL or active gcloud account
@@ -340,9 +327,7 @@ if [[ "${OPERATOR_GRANT_ACTAS:-true}" == "true" ]]; then
     else
       operator_member="user:${operator_email}"
     fi
-    OP_SA_POLICY_TMP="$(mktemp)"
-    gcloud iam service-accounts get-iam-policy "${PROD_SA_EMAIL}" --format=json --project "${PROJECT_ID}" >"${OP_SA_POLICY_TMP}"
-    if ! jq -e --arg m "$operator_member" '.bindings[]? | select(.role=="roles/iam.serviceAccountUser") | .members[]? | select(.==$m)' "${OP_SA_POLICY_TMP}" >/dev/null; then
+    if ! gcloud iam service-accounts get-iam-policy "${PROD_SA_EMAIL}" --format=json --project "${PROJECT_ID}" | jq -e --arg m "$operator_member" '.bindings[]? | select(.role=="roles/iam.serviceAccountUser") | .members[]? | select(.==$m)' >/dev/null 2>&1; then
       info "Granting roles/iam.serviceAccountUser on ${PROD_SA_EMAIL} to ${operator_member} (for local deploys)"
       gcloud iam service-accounts add-iam-policy-binding "${PROD_SA_EMAIL}" \
         --member "$operator_member" \
@@ -351,17 +336,14 @@ if [[ "${OPERATOR_GRANT_ACTAS:-true}" == "true" ]]; then
     else
       info "Operator already has Service Account User on ${PROD_SA_EMAIL}: ${operator_member}"
     fi
-    rm -f "${OP_SA_POLICY_TMP}"
   else
     info "No operator email resolved; skipping operator actAs grant"
   fi
 fi
 
 # Allow Cloud Scheduler service agent to mint tokens for the Scheduler SA when invoking the job
-SCHEDULER_SA_POLICY_TMP="$(mktemp)"
-gcloud iam service-accounts get-iam-policy "${SCHED_SA_EMAIL}" --format=json --project "${PROJECT_ID}" >"${SCHEDULER_SA_POLICY_TMP}"
 SCHED_AGENT="service-${PROJECT_NUMBER}@gcp-sa-cloudscheduler.iam.gserviceaccount.com"
-if ! jq -e --arg m "serviceAccount:${SCHED_AGENT}" '.bindings[]? | select(.role=="roles/iam.serviceAccountTokenCreator") | .members[]? | select(.==$m)' "${SCHEDULER_SA_POLICY_TMP}" >/dev/null; then
+if ! gcloud iam service-accounts get-iam-policy "${SCHED_SA_EMAIL}" --format=json --project "${PROJECT_ID}" | jq -e --arg m "serviceAccount:${SCHED_AGENT}" '.bindings[]? | select(.role=="roles/iam.serviceAccountTokenCreator") | .members[]? | select(.==$m)' >/dev/null 2>&1; then
   info "Granting roles/iam.serviceAccountTokenCreator on ${SCHED_SA_EMAIL} to ${SCHED_AGENT} (Cloud Scheduler service agent)"
   gcloud iam service-accounts add-iam-policy-binding "${SCHED_SA_EMAIL}" \
     --member "serviceAccount:${SCHED_AGENT}" \
@@ -370,13 +352,10 @@ if ! jq -e --arg m "serviceAccount:${SCHED_AGENT}" '.bindings[]? | select(.role=
 else
   info "Scheduler service agent already has TokenCreator on ${SCHED_SA_EMAIL}"
 fi
-rm -f "${SCHEDULER_SA_POLICY_TMP}"
 
 # Allow the deployer (PROD SA) to configure Scheduler with --oauth-service-account-email
 # This requires iam.serviceAccounts.actAs on the Scheduler SA
-SCHEDULER_SA_POLICY_TMP2="$(mktemp)"
-gcloud iam service-accounts get-iam-policy "${SCHED_SA_EMAIL}" --format=json --project "${PROJECT_ID}" >"${SCHEDULER_SA_POLICY_TMP2}"
-if ! jq -e --arg m "serviceAccount:${PROD_SA_EMAIL}" '.bindings[]? | select(.role=="roles/iam.serviceAccountUser") | .members[]? | select(.==$m)' "${SCHEDULER_SA_POLICY_TMP2}" >/dev/null; then
+if ! gcloud iam service-accounts get-iam-policy "${SCHED_SA_EMAIL}" --format=json --project "${PROJECT_ID}" | jq -e --arg m "serviceAccount:${PROD_SA_EMAIL}" '.bindings[]? | select(.role=="roles/iam.serviceAccountUser") | .members[]? | select(.==$m)' >/dev/null 2>&1; then
   info "Granting roles/iam.serviceAccountUser on ${SCHED_SA_EMAIL} to ${PROD_SA_EMAIL} (for Scheduler OAuth config)"
   gcloud iam service-accounts add-iam-policy-binding "${SCHED_SA_EMAIL}" \
     --member "serviceAccount:${PROD_SA_EMAIL}" \
@@ -385,7 +364,6 @@ if ! jq -e --arg m "serviceAccount:${PROD_SA_EMAIL}" '.bindings[]? | select(.rol
 else
   info "Deployer already has Service Account User on ${SCHED_SA_EMAIL}"
 fi
-rm -f "${SCHEDULER_SA_POLICY_TMP2}"
 
 # Optional: grant BigQuery Job User to a developer Google Group for per-dev work
 if [[ -n "${DEV_GROUP_EMAIL:-}" ]]; then
@@ -528,23 +506,16 @@ info "Ensuring bucket IAM (CI) for artifacts bucket (${ARTIFACTS_BUCKET_EFFECTIV
 ensure_bucket_binding "${ARTIFACTS_BUCKET_EFFECTIVE}" "roles/storage.objectAdmin" "serviceAccount:${CI_SA_EMAIL}"
 
 # Verify IAM took effect for CI SA
-IAM_TMP="$(mktemp)"
-if gcloud storage buckets get-iam-policy "gs://${ARTIFACTS_BUCKET_EFFECTIVE}" --format=json --project "${PROJECT_ID}" >"${IAM_TMP}" 2>/dev/null; then
-  if jq -e --arg m "serviceAccount:${CI_SA_EMAIL}" '.bindings[]? | select(.role=="roles/storage.objectAdmin") | .members[]? | select(.==$m)' "${IAM_TMP}" >/dev/null; then
-    info "Verified CI SA has objectAdmin on gs://${ARTIFACTS_BUCKET_EFFECTIVE}"
-  else
-    echo "[error] CI SA is missing roles/storage.objectAdmin on gs://${ARTIFACTS_BUCKET_EFFECTIVE}." >&2
-    echo "        Ensure your account has permission to modify bucket IAM and re-run." >&2
-    echo "        You can also grant it manually:" >&2
-    echo "        gcloud storage buckets add-iam-policy-binding gs://${ARTIFACTS_BUCKET_EFFECTIVE} \\" >&2
-    echo "          --member serviceAccount:${CI_SA_EMAIL} --role roles/storage.objectAdmin --project ${PROJECT_ID}" >&2
-    exit 1
-  fi
+if gcloud storage buckets get-iam-policy "gs://${ARTIFACTS_BUCKET_EFFECTIVE}" --format=json --project "${PROJECT_ID}" 2>/dev/null | jq -e --arg m "serviceAccount:${CI_SA_EMAIL}" '.bindings[]? | select(.role=="roles/storage.objectAdmin") | .members[]? | select(.==$m)' >/dev/null 2>&1; then
+  info "Verified CI SA has objectAdmin on gs://${ARTIFACTS_BUCKET_EFFECTIVE}"
 else
-  echo "[error] Could not fetch IAM policy for gs://${ARTIFACTS_BUCKET_EFFECTIVE} to verify bindings." >&2
+  echo "[error] CI SA is missing roles/storage.objectAdmin on gs://${ARTIFACTS_BUCKET_EFFECTIVE}." >&2
+  echo "        Ensure your account has permission to modify bucket IAM and re-run." >&2
+  echo "        You can also grant it manually:" >&2
+  echo "        gcloud storage buckets add-iam-policy-binding gs://${ARTIFACTS_BUCKET_EFFECTIVE} \\" >&2
+  echo "          --member serviceAccount:${CI_SA_EMAIL} --role roles/storage.objectAdmin --project ${PROJECT_ID}" >&2
   exit 1
 fi
-rm -f "${IAM_TMP}"
 
 # Allow docs viewer SA to read docs (if defined)
 if [[ -n "${DOCS_VIEWER_SA_ID:-}" ]]; then
