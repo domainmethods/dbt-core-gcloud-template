@@ -227,12 +227,26 @@ scenario_5() {
   cleanup
 }
 
+scenario_6() {
+  echo "  scenario 6: bq returns a non-JSON banner for column introspection"
+  make_sandbox banner_introspect
+  run_diff; local rc=$?
+  assert_eq 0 "$rc" "exits 0 when introspection output is unparseable"
+
+  # The requirement is that unparseable output is never reported as a clean
+  # diff. The exact status string is pinned here once observed.
+  local summary; summary=$(cat "$SANDBOX/out/schema-summary.md")
+  assert_contains "$summary" "NON_JSON" "unparseable introspection is marked NON_JSON"
+  cleanup
+}
+
 echo "test_pr_schema_diff.sh"
 scenario_1
 scenario_2
 scenario_3
 scenario_4
 scenario_5
+scenario_6
 
 echo ""
 echo "passed: $PASS_COUNT  failed: $FAIL_COUNT"

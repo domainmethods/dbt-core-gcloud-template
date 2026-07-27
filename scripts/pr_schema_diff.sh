@@ -130,6 +130,22 @@ bq_table_options() {
   bq_json "$project" "$sql"
 }
 
+# Returns 0 if the argument parses as a JSON array.
+is_json_array() {
+  [[ -n "${1:-}" ]] && printf '%s' "$1" | jq -e 'type=="array"' >/dev/null 2>&1
+}
+
+# Echoes the argument if it is a JSON array, otherwise an empty array.
+# Apply ONLY where a value is handed to jq. Status classification reads the
+# raw bq output, because "Access Denied" is a signal that normalizing destroys.
+as_json_array() {
+  if is_json_array "${1:-}"; then
+    printf '%s' "$1"
+  else
+    printf '[]'
+  fi
+}
+
 normalize_options() {
   jq -r '[.[] | {key: .option_name, val: .option_value}] | map({(.key): .val}) | add // {}'
 }
@@ -253,26 +269,41 @@ for m in "${MODELS[@]}"; do
   dev_opts_json=$(bq_table_options "$DEV_P" "$DEV_D" "$DEV_T" 2>/dev/null || true)
   prod_opts_json=$(bq_table_options "$PROD_P" "$PROD_D" "$PROD_T" 2>/dev/null || true)
 
+  # --- Classify from RAW output. Do not normalize before this block: ---
+  # as_json_array would rewrite "Access Denied" to "[]", which is non-empty and
+  # no longer matches the substring test, silently downgrading a permissions
+  # failure to a clean OK diff.
   status="OK"
   if [[ -z "$prod_cols_json" || "$prod_cols_json" == *"Access Denied"* ]]; then
     status="AUTH_ERROR"
+  elif ! is_json_array "$prod_cols_json"; then
+    status="NON_JSON"
   fi
 
-  # Detect new model (no prod cols and no tables row)
-  prod_type=$(echo "${prod_type_json:-[]}" | jq -r '.[0].table_type // empty')
-  if [[ -z "$prod_type" && "$status" != "AUTH_ERROR" ]]; then
+  # --- Normalize at the jq boundary. ---
+  dev_cols=$(as_json_array "${dev_cols_json:-}")
+  prod_cols=$(as_json_array "${prod_cols_json:-}")
+  dev_type_arr=$(as_json_array "${dev_type_json:-}")
+  prod_type_arr=$(as_json_array "${prod_type_json:-}")
+  dev_opts_arr=$(as_json_array "${dev_opts_json:-}")
+  prod_opts_arr=$(as_json_array "${prod_opts_json:-}")
+
+  # Detect new model (no prod table row). Only reclassify a clean OK status so
+  # AUTH_ERROR and NON_JSON are not overwritten.
+  prod_type=$(printf '%s' "$prod_type_arr" | jq -r '.[0].table_type // empty')
+  if [[ -z "$prod_type" && "$status" == "OK" ]]; then
     status="NEW_MODEL"
   fi
-  dev_type=$(echo "${dev_type_json:-[]}" | jq -r '.[0].table_type // empty')
+  dev_type=$(printf '%s' "$dev_type_arr" | jq -r '.[0].table_type // empty')
 
   # Normalize options
-  dev_opts=$(echo "${dev_opts_json:-[]}" | jq -r ' . | (if type=="array" then . else [] end) ' | normalize_options)
-  prod_opts=$(echo "${prod_opts_json:-[]}" | jq -r ' . | (if type=="array" then . else [] end) ' | normalize_options)
+  dev_opts=$(printf '%s' "$dev_opts_arr" | normalize_options)
+  prod_opts=$(printf '%s' "$prod_opts_arr" | normalize_options)
 
   # Column diff (skip if auth error and not new model)
   added=0; removed=0; changed=0
   if [[ "$status" == "OK" || "$status" == "NEW_MODEL" ]]; then
-    col_diff=$(compute_column_diff "${dev_cols_json:-[]}" "${prod_cols_json:-[]}")
+    col_diff=$(compute_column_diff "$dev_cols" "$prod_cols")
     added=$(echo "$col_diff" | jq -r '.added | length')
     removed=$(echo "$col_diff" | jq -r '.removed | length')
     changed=$(echo "$col_diff" | jq -r '.changed | length')
