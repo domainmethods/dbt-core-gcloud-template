@@ -225,10 +225,23 @@ echo >> "$summary_md"
 echo "| Model | Status | Moved | Type Change | +Cols | -Cols | Changed | Part/Cluster Changes |" >> "$summary_md"
 echo "|---|---|---|---|---:|---:|---:|---|" >> "$summary_md"
 
+# Movement is a LOGICAL question: did this PR change the model's database,
+# schema or alias relative to production? It must therefore compare the PR
+# manifest node against the PROD manifest node.
+#
+# It must NOT compare the physical locations that were introspected: DEV_P/DEV_D
+# are deliberately forced to the CI project and the ephemeral CI dataset, so a
+# physical comparison differs by construction and reported every model as MOVED
+# (measured: 37/37 on a replay of PR #72).
+#
+# $3 is "true" only when the prod FQN came from a real prod-manifest node. When
+# no prod node was found the prod FQN is synthesised from the PR's own
+# identifier, so comparing against it would manufacture a confident UNCHANGED
+# that was never actually checked. That case is genuinely UNKNOWN.
 movement_status() {
-  local dev_fqn=$1 prod_fqn=$2
-  if [[ -z "$prod_fqn" ]]; then echo "UNKNOWN"; return; fi
-  if [[ "$dev_fqn" == "$prod_fqn" ]]; then echo "UNCHANGED"; else echo "MOVED"; fi
+  local pr_fqn=$1 prod_fqn=$2 prod_from_manifest=${3:-false}
+  if [[ "$prod_from_manifest" != "true" || -z "$prod_fqn" ]]; then echo "UNKNOWN"; return; fi
+  if [[ "$pr_fqn" == "$prod_fqn" ]]; then echo "UNCHANGED"; else echo "MOVED"; fi
 }
 
 for m in "${MODELS[@]}"; do
@@ -251,8 +264,12 @@ for m in "${MODELS[@]}"; do
   # Dev side uses CI env regardless of manifest database to ensure correctness
   DEV_P="$DEV_PROJECT"; DEV_D="$DEV_DATASET"; DEV_T="$pr_ident"
 
-  # Prod node (from prod manifest preferred)
+  # Prod node (from prod manifest preferred).
+  # prod_from_manifest records whether the prod FQN below is a real observation
+  # of production or a fallback synthesised from configuration. Movement is only
+  # answerable in the former case.
   prod_fqn_json=""
+  prod_from_manifest=false
   if [[ -f "$PROD_MANIFEST" && -n "$pr_uid" && "$pr_uid" != "null" ]]; then
     prod_node=$(get_node_by_uid "$PROD_MANIFEST" "$pr_uid")
     if [[ -z "$prod_node" || "$prod_node" == "null" ]]; then
@@ -261,6 +278,7 @@ for m in "${MODELS[@]}"; do
     fi
     if [[ -n "$prod_node" && "$prod_node" != "null" ]]; then
       prod_fqn_json=$(echo "$prod_node" | node_to_fqn)
+      prod_from_manifest=true
     fi
   fi
 
@@ -272,14 +290,27 @@ for m in "${MODELS[@]}"; do
   PROD_D=$(echo "$prod_fqn_json" | jq -r .dataset)
   PROD_T=$(echo "$prod_fqn_json" | jq -r .identifier)
 
+  # Physical relations that are actually introspected below. The dev side is
+  # pinned to the ephemeral CI dataset on purpose; these two lines are for
+  # debugging the queries, NOT for movement detection.
   dev_fqn_str="$DEV_P.$DEV_D.$DEV_T"
   prod_fqn_str="$PROD_P.$PROD_D.$PROD_T"
+  echo "Physical relations queried:" | tee -a "$out"
   echo "Dev:  $dev_fqn_str" | tee -a "$out"
   echo "Prod: $prod_fqn_str" | tee -a "$out"
 
-  move=$(movement_status "$dev_fqn_str" "$prod_fqn_str")
+  # Logical (manifest) locations. Movement compares these.
+  pr_logical_fqn="$pr_proj.$pr_ds.$pr_ident"
+  prod_logical_fqn=""
+  if [[ "$prod_from_manifest" == "true" ]]; then
+    prod_logical_fqn="$PROD_P.$PROD_D.$PROD_T"
+  fi
+  echo "Logical PR:   $pr_logical_fqn" | tee -a "$out"
+  echo "Logical prod: ${prod_logical_fqn:-<not in prod manifest>}" | tee -a "$out"
+
+  move=$(movement_status "$pr_logical_fqn" "$prod_logical_fqn" "$prod_from_manifest")
   if [[ "$move" == "MOVED" ]]; then
-    echo "Movement: $prod_fqn_str -> $dev_fqn_str" | tee -a "$out"
+    echo "Movement: $prod_logical_fqn -> $pr_logical_fqn" | tee -a "$out"
   else
     echo "Movement: $move" | tee -a "$out"
   fi
@@ -365,9 +396,10 @@ for m in "${MODELS[@]}"; do
   echo "SUMMARY|model=$m|status=$status|moved=$move|type_change=${type_change:-none}|added=$added|removed=$removed|changed=$changed|opt_changes=$opt_changes_cnt" | tee -a "$out"
 
   # Append to markdown table
+  # Show the LOGICAL move (prod manifest → PR manifest), never the CI dataset.
   moved_cell="$move"
   if [[ "$move" == "MOVED" ]]; then
-    moved_cell="$prod_fqn_str → $dev_fqn_str"
+    moved_cell="$prod_logical_fqn → $pr_logical_fqn"
   fi
   partcell=$( [[ "$opt_changes_cnt" -gt 0 ]] && echo "yes" || echo "no" )
   echo "| $m | $status | $moved_cell | ${type_change:-} | $added | $removed | $changed | $partcell |" >> "$summary_md"

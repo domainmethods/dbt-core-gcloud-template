@@ -49,8 +49,15 @@ assert_not_contains() {
 # Fixture manifest: two models in prod dataset `analytics`.
 #   fct_example - exists in prod
 #   stg_example - has no prod counterpart, so exercises NEW_MODEL
+#
+# $2 (optional) selects a variant:
+#   base  (default) - as described above
+#   moved           - fct_example lives in a different schema, i.e. the PR has
+#                     relocated it relative to prod. Only `schema` changes so the
+#                     table_name-keyed bq stub still answers for it.
 write_manifest() {
-  cat > "$1" <<'JSON'
+  local path=$1 variant=${2:-base}
+  cat > "$path" <<'JSON'
 {
   "nodes": {
     "model.tpl.fct_example": {
@@ -67,12 +74,20 @@ write_manifest() {
   "sources": {}
 }
 JSON
+  if [[ "$variant" == "moved" ]]; then
+    jq '.nodes["model.tpl.fct_example"].schema = "analytics_legacy"' \
+      "$path" > "$path.tmp" && mv "$path.tmp" "$path"
+  fi
 }
 
 # Builds an isolated sandbox and sets SANDBOX and BQ_CALL_LOG.
 # $1 selects stub behaviour, consumed by the bq stub via STUB_MODE.
+# $2 (optional) selects what prod_state/manifest.json contains:
+#   same  (default) - identical to the PR manifest, so nothing has moved
+#   moved           - prod has fct_example in a different schema
+#   none            - no prod manifest at all, so movement is unknowable
 make_sandbox() {
-  local mode=$1
+  local mode=$1 prod_manifest=${2:-same}
   SANDBOX=$(mktemp -d)
   STUB_MODE=$mode
   BQ_CALL_LOG="$SANDBOX/bq_calls.log"
@@ -80,7 +95,12 @@ make_sandbox() {
   : > "$BQ_CALL_LOG"
 
   write_manifest "$SANDBOX/target/manifest.json"
-  write_manifest "$SANDBOX/prod_state/manifest.json"
+  case "$prod_manifest" in
+    same)  write_manifest "$SANDBOX/prod_state/manifest.json" ;;
+    moved) write_manifest "$SANDBOX/prod_state/manifest.json" moved ;;
+    none)  rmdir "$SANDBOX/prod_state" ;;
+    *)     echo "unknown prod_manifest mode: $prod_manifest" >&2; exit 1 ;;
+  esac
 
   cat > "$SANDBOX/stubs/dbt" <<'STUB'
 #!/usr/bin/env bash
@@ -382,6 +402,91 @@ scenario_10() {
   cleanup
 }
 
+scenario_11() {
+  echo "  scenario 11: movement UNCHANGED (Defect F regression guard)"
+  # PR and prod manifests agree on database/schema/alias, so nothing has moved.
+  # This scenario fails if movement reverts to comparing the physical CI dataset
+  # against prod: those differ by construction and every row comes out MOVED.
+  make_sandbox ok_no_orphans same
+  run_diff; local rc=$?
+  assert_eq 0 "$rc" "exits 0"
+
+  local line row detail
+  line=$(summary_line_for fct_example)
+  row=$(table_row_for fct_example)
+  detail=$(cat "$SANDBOX/out/fct_example.txt")
+
+  assert_contains "$line" "|moved=UNCHANGED|" \
+    "identical manifest locations are UNCHANGED, not MOVED"
+  assert_not_contains "$line" "|moved=MOVED|" \
+    "the ephemeral CI dataset is never mistaken for a move"
+  assert_contains "$row" "| UNCHANGED |" "markdown Moved cell reads UNCHANGED"
+  assert_not_contains "$row" "→" "no movement arrow is rendered when nothing moved"
+  assert_not_contains "$row" "ci_pr_1" "the CI dataset never appears in the Moved cell"
+  assert_contains "$detail" "Movement: UNCHANGED" "detail report states UNCHANGED"
+
+  # Both models sit in the same place in both manifests.
+  assert_contains "$(summary_line_for stg_example)" "|moved=UNCHANGED|" \
+    "a NEW_MODEL relation with an unmoved manifest node is still UNCHANGED"
+
+  # The physical query targets stay visible for debugging, explicitly labelled.
+  assert_contains "$detail" "Physical relations queried:" \
+    "physical query targets are labelled as such"
+  assert_contains "$detail" "Dev:  ciproj.ci_pr_1.fct_example" \
+    "physical dev target is still the CI dataset"
+  cleanup
+}
+
+scenario_12() {
+  echo "  scenario 12: movement MOVED (logical FQNs, not the CI dataset)"
+  # Prod has fct_example in schema `analytics_legacy`; the PR moved it to
+  # `analytics`.
+  make_sandbox ok_no_orphans moved
+  run_diff; local rc=$?
+  assert_eq 0 "$rc" "exits 0"
+
+  local line row detail
+  line=$(summary_line_for fct_example)
+  row=$(table_row_for fct_example)
+  detail=$(cat "$SANDBOX/out/fct_example.txt")
+
+  assert_contains "$line" "|moved=MOVED|" "a changed manifest schema is MOVED"
+  assert_contains "$row" "prodproj.analytics_legacy.fct_example → prodproj.analytics.fct_example" \
+    "the arrow shows prod logical → PR logical"
+  assert_not_contains "$row" "ci_pr_1" "the arrow never shows the CI dataset"
+  assert_contains "$detail" "Movement: prodproj.analytics_legacy.fct_example -> prodproj.analytics.fct_example" \
+    "detail report shows the logical move"
+
+  # The unmoved model in the same run is unaffected.
+  assert_contains "$(summary_line_for stg_example)" "|moved=UNCHANGED|" \
+    "an unmoved model in the same run stays UNCHANGED"
+  cleanup
+}
+
+scenario_13() {
+  echo "  scenario 13: movement UNKNOWN when there is no prod manifest"
+  # Without prod_state/manifest.json the prod FQN is synthesised from the PR's
+  # own identifier. Comparing against it would report a confident UNCHANGED that
+  # was never checked, so movement must be UNKNOWN.
+  make_sandbox ok_no_orphans none
+  run_diff; local rc=$?
+  assert_eq 0 "$rc" "exits 0 with no prod manifest"
+  assert_contains "$RUN_STDOUT" "movement=UNKNOWN" "announces that movement is unknowable"
+
+  local line row
+  line=$(summary_line_for fct_example)
+  row=$(table_row_for fct_example)
+  assert_contains "$line" "|moved=UNKNOWN|" "a synthesised prod FQN yields UNKNOWN"
+  assert_not_contains "$line" "|moved=UNCHANGED|" \
+    "a synthesised prod FQN is never reported as UNCHANGED"
+  assert_not_contains "$line" "|moved=MOVED|" \
+    "a synthesised prod FQN is never reported as MOVED"
+  assert_contains "$row" "| UNKNOWN |" "markdown Moved cell reads UNKNOWN"
+  assert_contains "$(cat "$SANDBOX/out/fct_example.txt")" "<not in prod manifest>" \
+    "detail report says the prod manifest node was not found"
+  cleanup
+}
+
 echo "test_pr_schema_diff.sh"
 scenario_1
 scenario_2
@@ -393,6 +498,9 @@ scenario_7
 scenario_8
 scenario_9
 scenario_10
+scenario_11
+scenario_12
+scenario_13
 
 echo ""
 echo "passed: $PASS_COUNT  failed: $FAIL_COUNT"
