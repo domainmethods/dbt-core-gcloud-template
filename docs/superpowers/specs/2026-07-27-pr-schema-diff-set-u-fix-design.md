@@ -102,8 +102,8 @@ Fixing Defect B activates code that has never executed. The specific hazard is
 six `bq_*` helpers can return banner text or an error string rather than JSON.
 Under `set -e` that aborts the script.
 
-Add a single normalizing helper and route all six introspection results through
-it, so non-JSON degrades to an empty array instead of aborting:
+Add a single normalizing helper so non-JSON degrades to an empty array instead of
+aborting:
 
 ```bash
 as_json_array() {
@@ -115,6 +115,31 @@ as_json_array() {
   fi
 }
 ```
+
+**Ordering rule — classify from raw, normalize at the jq boundary.** The
+introspection results are both a *signal* and a *payload*. Line 255 classifies
+status by inspecting the raw string:
+
+```bash
+if [[ -z "$prod_cols_json" || "$prod_cols_json" == *"Access Denied"* ]]; then
+    status="AUTH_ERROR"
+```
+
+Normalizing before this check would rewrite `Access Denied` to `[]`, which is
+non-empty and no longer matches the substring, silently downgrading a permissions
+failure to a clean `OK` diff. `as_json_array` must therefore be applied **only**
+where a value is handed to `jq --argjson`, never before status classification.
+
+Status classification is extended to cover the third case, which currently has no
+representation:
+
+- empty or `Access Denied` → `AUTH_ERROR` (unchanged)
+- non-empty but not parseable as a JSON array → `NON_JSON` (new)
+- parseable, but no prod table type → `NEW_MODEL` (unchanged)
+- otherwise → `OK` (unchanged)
+
+`NON_JSON` rows are emitted in the summary table with zero column counts. The
+requirement is that unparseable introspection output is never reported as `OK`.
 
 ### 3. Fix the orphan block (issue #53)
 
@@ -164,11 +189,20 @@ Scenarios and assertions, all run with stdin closed to mimic CI:
 | 2 | Prod dataset unreadable | exit 0, `orphans.md` contains the "Could not list tables" warning |
 | 3 | One orphan present | exit 0, `orphans.md` lists it |
 | 4 | `bq` returns a non-JSON banner | exit 0, no `jq` parse abort |
-| 5 | **Regression guard for Defect B** | summary table has one row per selected model and no `Could not resolve model` warning |
-| 6 | Non-JSON introspection output | exit 0, model row still emitted with a degraded status |
+| 5 | **Regression guard for Defect B** | see below |
+| 6 | Non-JSON introspection output | exit 0, and status is **not** `OK` |
 
-Scenario 5 is the assertion that locks in the fix for Defect B, and is the one
-that would have caught the no-op in the first place.
+**Scenario 5, stated precisely.** For every model returned by `dbt ls`, the run
+must emit exactly one row in `schema-summary.md` and zero
+`Could not resolve model` warnings. Models with no prod counterpart — the common
+case on a template's first run — count as satisfying the row requirement with
+status `NEW_MODEL`; the assertion is on row *count* and warning *absence*, not on
+status value. This is the assertion that locks in the fix for Defect B and is the
+one that would have caught the no-op in the first place.
+
+**Scenario 6** asserts only that the run survives and does not misreport
+unparseable output as `OK`. The exact status string is pinned during
+implementation, once the behaviour is observed rather than predicted.
 
 The harness also prints the recorded `bq` invocation count. That converts the
 performance risk below into a measured number without touching real BigQuery.
@@ -196,20 +230,53 @@ estimate. This change ships the correctness fixes and the instrumentation; the
 `bq` invocation count from the harness, plus the first real CI run, decide whether
 batching is warranted as a follow-up.
 
-## Rollout
+## Validation and rollout
 
-1. Upstream template: single PR carrying items 1-5, closing issue #53.
-2. File a separate upstream issue for Defect B, cross-referencing #53, with the
+Validation runs downstream-first. This template repository has only two example
+models and its own CI is red, so it cannot confirm that the Defect B fix works at
+realistic scale. `weightcare-pipeline-new` has green CI and roughly 40 real
+models, and already carries the item 3 fix, so it isolates Defect B cleanly.
+
+**Tier 1 — stub fixtures, local, free.** The `tests/test_pr_schema_diff.sh`
+harness described above, run against synthetic manifests.
+
+**Tier 2 — real manifest, local, free.** Clone `weightcare-pipeline-new`, generate
+its manifest offline with `dbt parse` (no warehouse connection required), and run
+the fixed script against roughly 40 real models with the counting `bq` stub. This
+tier is the substantive one: it proves the Defect B fix against a manifest shaped
+like production, and it produces the true `bq` invocation count that decides the
+batching question. No credentials, no spend, no production impact.
+
+**Tier 3 — real CI, costs money, requires authorization.** A draft PR on
+`weightcare-pipeline-new` triggering its `bigquery-ci` job end to end. This is the
+only tier that exercises real BigQuery introspection and the only one that
+measures true wall-clock. It runs against a production GCP project and is visible
+to the repository owner. Access is push, not admin. **This tier is not initiated
+without explicit approval, and nothing is merged downstream unilaterally.**
+
+Rollout order:
+
+1. Implement items 1-5 on a branch. Tier 1 and Tier 2 must pass.
+2. Tier 3, if authorized. Record the measured query count and wall-clock.
+3. Upstream template PR carrying items 1-5, closing issue #53, citing the Tier 2
+   and Tier 3 results.
+4. File a separate upstream issue for Defect B, cross-referencing #53, with the
    evidence recorded here.
-3. Downstream `weightcare-pipeline-new`: a separate PR carrying only items 1 and
-   2, since it already has item 3. It is a private production repository, so this
-   is prepared for review rather than merged unilaterally.
+5. Downstream PR carrying items 1 and 2 only, opened for the owner's review.
+
+Nothing is committed to the upstream default branch before Tier 2 passes.
 
 ## Risks
 
 - The template repository's own CI is currently red across all recent runs, so it
-  cannot serve as a verification signal. Local stub tests are the only feedback
-  loop available before merge.
+  cannot serve as a verification signal. This is the reason validation is
+  downstream-first; without Tier 2 there would be no realistic feedback loop
+  before merge.
+- Tier 2 uses a manifest produced by `dbt parse` rather than the `dbt docs
+  generate` manifest CI actually consumes. If the two differ in a way that
+  matters to `get_node_by_name`, Tier 2 could pass while CI still fails. The
+  fields in question (`name`, `alias`, `schema`, `database`, `unique_id`) are
+  parse-time attributes, so divergence is unlikely, but only Tier 3 rules it out.
 - Stub tests verify control flow, not SQL correctness. They prove the script does
   not crash and does produce rows; they cannot prove the diff is semantically
   right.
