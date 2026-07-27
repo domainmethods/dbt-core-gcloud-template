@@ -73,13 +73,15 @@ if (( ${#MODELS[@]} == 0 )); then
 fi
 
 # Helper: get model node JSON from manifest by name
+# The manifest path must be passed to jq. Without it jq reads stdin, which is
+# empty under CI, so every lookup returned nothing and every model was skipped.
 get_node_by_name() {
-  local manifest=$1 name=$2
+  local manifest=$1
   jq -r --arg n "$2" '
-    .nodes 
+    .nodes
     | to_entries[]
     | select(.value.resource_type=="model" and .value.name==$n)
-    | .value'
+    | .value' "$manifest"
 }
 
 # Helper: get node by unique_id from manifest
@@ -161,7 +163,7 @@ compute_meta_diff() {
       require_partition_filter: ($o.require_partition_filter // null),
       clustering_fields: ($o.clustering_fields // null)
     };
-    (norm(devo)) as $d | (norm(prodo)) as $p |
+    (norm($devo)) as $d | (norm($prodo)) as $p |
     {
       table_type_change: (if ($devt|length)==0 or ($prodt|length)==0 then null else (if $devt==$prodt then null else {from:$prodt, to:$devt} end) end),
       option_changes: ( [

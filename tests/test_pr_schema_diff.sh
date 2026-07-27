@@ -204,11 +204,35 @@ scenario_4() {
   cleanup
 }
 
+scenario_5() {
+  echo "  scenario 5: regression guard — models actually resolve (Defect B)"
+  make_sandbox ok_no_orphans
+  run_diff; local rc=$?
+  assert_eq 0 "$rc" "exits 0"
+
+  # Every model returned by `dbt ls` must produce exactly one summary row and
+  # zero resolution warnings. Models with no prod counterpart satisfy the row
+  # requirement with status NEW_MODEL; the assertion is on row count and
+  # warning absence, not on status value.
+  assert_not_contains "$RUN_STDOUT" "Could not resolve model" \
+    "no model fails to resolve in the PR manifest"
+
+  local summary rows
+  summary=$(cat "$SANDBOX/out/schema-summary.md")
+  rows=$(grep -c '^| [a-z]' <<< "$summary")
+  assert_eq 2 "$rows" "summary table has one row per selected model"
+  assert_contains "$summary" "fct_example" "fct_example appears in the summary"
+  assert_contains "$summary" "stg_example" "stg_example appears in the summary"
+  assert_contains "$summary" "NEW_MODEL" "model with no prod counterpart is NEW_MODEL"
+  cleanup
+}
+
 echo "test_pr_schema_diff.sh"
 scenario_1
 scenario_2
 scenario_3
 scenario_4
+scenario_5
 
 echo ""
 echo "passed: $PASS_COUNT  failed: $FAIL_COUNT"
