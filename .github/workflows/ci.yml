@@ -15,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Test shell scripts
+        run: bash tests/test_pr_schema_diff.sh
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -114,6 +116,7 @@ jobs:
 
       - name: Generate schema diffs for changed models
         if: ${{ steps.dbt_build.outcome == 'success' }}
+        continue-on-error: true
         run: bash scripts/pr_schema_diff.sh
 
       - name: Upload CI artifacts (docs + manifest + data diffs)
