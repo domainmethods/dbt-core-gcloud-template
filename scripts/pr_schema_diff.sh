@@ -75,13 +75,20 @@ fi
 # Helper: get model node JSON from manifest by name
 # The manifest path must be passed to jq. Without it jq reads stdin, which is
 # empty under CI, so every lookup returned nothing and every model was skipped.
+# Model names are only unique within a package, so a name shared with an
+# installed package used to emit two concatenated objects and corrupt the SQL.
+# Return exactly one node: this project's own model wins, otherwise the first
+# match in manifest order.
 get_node_by_name() {
   local manifest=$1
   jq -r --arg n "$2" '
-    .nodes
-    | to_entries[]
-    | select(.value.resource_type=="model" and .value.name==$n)
-    | .value' "$manifest"
+    (.metadata.project_name // "") as $proj
+    | [ .nodes
+        | to_entries[]
+        | select(.value.resource_type=="model" and .value.name==$n)
+        | .value ]
+    | (map(select(.package_name == $proj)) + .)
+    | (.[0] // empty)' "$manifest"
 }
 
 # Helper: get node by unique_id from manifest
@@ -135,6 +142,19 @@ is_json_array() {
   [[ -n "${1:-}" ]] && printf '%s' "$1" | jq -e 'type=="array"' >/dev/null 2>&1
 }
 
+# Classifies ONE raw bq result: OK | AUTH_ERROR | NON_JSON.
+# Must be called on the raw value, before as_json_array touches it.
+classify_raw() {
+  local raw=${1:-}
+  if [[ -z "$raw" || "$raw" == *"Access Denied"* ]]; then
+    echo "AUTH_ERROR"
+  elif ! is_json_array "$raw"; then
+    echo "NON_JSON"
+  else
+    echo "OK"
+  fi
+}
+
 # Echoes the argument if it is a JSON array, otherwise an empty array.
 # Apply ONLY where a value is handed to jq. Status classification reads the
 # raw bq output, because "Access Denied" is a signal that normalizing destroys.
@@ -152,7 +172,9 @@ normalize_options() {
 
 compute_column_diff() {
   local dev_json=$1 prod_json=$2
-  jq -r --argjson dev "$dev_json" --argjson prod "$prod_json" '
+  # `-n` is required: nothing is piped in, so without it jq has zero inputs,
+  # runs the filter zero times, and exits 0 having printed nothing.
+  jq -n -r --argjson dev "$dev_json" --argjson prod "$prod_json" '
     def mapcols($arr): reduce $arr[] as $c ({}; .[$c.column_name] = {type: $c.data_type, nullable: $c.is_nullable});
     def keys_of($m): ($m|keys|sort);
     def inter($a;$b): ($a + $b | group_by(.) | map(select(length==2) | .[0]));
@@ -172,7 +194,8 @@ compute_column_diff() {
 
 compute_meta_diff() {
   local dev_type=$1 prod_type=$2 dev_opts_json=$3 prod_opts_json=$4
-  jq -r --arg devt "$dev_type" --arg prodt "$prod_type" --argjson devo "$dev_opts_json" --argjson prodo "$prod_opts_json" '
+  # `-n` is required here for the same reason as in compute_column_diff.
+  jq -n -r --arg devt "$dev_type" --arg prodt "$prod_type" --argjson devo "$dev_opts_json" --argjson prodo "$prod_opts_json" '
     def norm($o): {
       partitioning_type: ($o.partitioning_type // null),
       partitioning_field: ($o.partitioning_field // null),
@@ -273,12 +296,23 @@ for m in "${MODELS[@]}"; do
   # as_json_array would rewrite "Access Denied" to "[]", which is non-empty and
   # no longer matches the substring test, silently downgrading a permissions
   # failure to a clean OK diff.
+  #
+  # Every value that feeds the diff is classified, on both sides. Classifying
+  # only prod columns left two silent downgrades: a denial on the prod TABLES
+  # query reported a permissions failure as NEW_MODEL, and a denial on the dev
+  # COLUMNS query reported every prod column as removed under status=OK.
+  # Table options are deliberately excluded: a zero-row TABLE_OPTIONS result is
+  # normal for an unpartitioned table and is not distinguishable from a failure.
   status="OK"
-  if [[ -z "$prod_cols_json" || "$prod_cols_json" == *"Access Denied"* ]]; then
-    status="AUTH_ERROR"
-  elif ! is_json_array "$prod_cols_json"; then
-    status="NON_JSON"
-  fi
+  for raw_result in "$prod_cols_json" "$dev_cols_json" "$prod_type_json" "$dev_type_json"; do
+    raw_class=$(classify_raw "$raw_result")
+    if [[ "$raw_class" == "AUTH_ERROR" ]]; then
+      status="AUTH_ERROR"
+      break
+    elif [[ "$raw_class" == "NON_JSON" && "$status" == "OK" ]]; then
+      status="NON_JSON"
+    fi
+  done
 
   # --- Normalize at the jq boundary. ---
   dev_cols=$(as_json_array "${dev_cols_json:-}")

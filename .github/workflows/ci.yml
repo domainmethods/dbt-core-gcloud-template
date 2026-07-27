@@ -114,9 +114,16 @@ jobs:
         if: ${{ steps.dbt_build.outcome == 'success' }}
         run: bash scripts/pr_data_diff.sh
 
+      # continue-on-error keeps a schema-diff failure from failing the build, but
+      # it does not bound runtime, and GitHub applies no per-step timeout (the
+      # job-level 360-minute default would otherwise apply). The downstream
+      # publish steps gate on this step's outcome so a partial report is never
+      # posted as if it were complete.
       - name: Generate schema diffs for changed models
+        id: schema_diff
         if: ${{ steps.dbt_build.outcome == 'success' }}
         continue-on-error: true
+        timeout-minutes: 10
         run: bash scripts/pr_schema_diff.sh
 
       - name: Upload CI artifacts (docs + manifest + data diffs)
@@ -153,7 +160,7 @@ jobs:
           path: diff_reports/
 
       - name: Attach schema diffs to PR as artifact
-        if: ${{ steps.dbt_build.outcome == 'success' && hashFiles('schema_diff_reports/**') != '' }}
+        if: ${{ steps.schema_diff.outcome == 'success' && hashFiles('schema_diff_reports/**') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: schema-diff-pr-${{ github.event.number }}-${{ github.run_id }}
@@ -183,7 +190,7 @@ jobs:
             await github.rest.issues.createComment({ owner, repo, issue_number, body: fullBody });
 
       - name: Post schema summary comment on PR
-        if: ${{ steps.dbt_build.outcome == 'success' && hashFiles('schema_diff_reports/schema-summary.md') != '' && github.event.pull_request.head.repo.full_name == github.repository }}
+        if: ${{ steps.schema_diff.outcome == 'success' && hashFiles('schema_diff_reports/schema-summary.md') != '' && github.event.pull_request.head.repo.full_name == github.repository }}
         uses: actions/github-script@v7
         with:
           script: |
