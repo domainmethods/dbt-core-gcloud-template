@@ -306,58 +306,71 @@ for m in "${MODELS[@]}"; do
   echo "| $m | $status | $moved_cell | ${type_change:-} | $added | $removed | $changed | $partcell |" >> "$summary_md"
 done
 
-# Orphans report — only if we can read prod
+# Orphans report — best-effort, never fails CI.
+# Isolated in a subshell with relaxed error handling: this is a side report,
+# and a failure here must never abort the schema diff for changed models.
 orphans_md="$ARTIFACT_DIR/orphans.md"
-echo "# Orphaned Production Relations" > "$orphans_md"
-echo >> "$orphans_md"
-echo "_Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")_" >> "$orphans_md"
-echo >> "$orphans_md"
+(
+  set +euo pipefail
 
-# Build coverage set from manifest (prefer prod manifest, else PR manifest)
-manifest_for_orphans="$PR_MANIFEST"
-if [[ -f "$PROD_MANIFEST" ]]; then
-  manifest_for_orphans="$PROD_MANIFEST"
-fi
+  echo "# Orphaned Production Relations" > "$orphans_md"
+  echo >> "$orphans_md"
+  echo "_Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")_" >> "$orphans_md"
+  echo >> "$orphans_md"
 
-# Helper: coverage keys as dataset.table strings
-coverage=$(jq -r '
-  def model_key($p): (.schema + "." + ((.alias // .name) // ""));
-  def source_key($p): (.schema + "." + ((.identifier // .name) // ""));
-  [
-    (.nodes | to_entries[] | .value | select(.resource_type=="model") | model_key(.)) ,
-    (.sources | to_entries[] | .value | source_key(.))
-  ] | flatten | unique | .[]' "$manifest_for_orphans" 2>/dev/null || true)
-
-declare -A covered
-while IFS= read -r line; do
-  [[ -n "$line" ]] && covered["$line"]=1
-done <<< "$coverage"
-
-declare -a orphans
-for ds in "${PROD_DATASETS_ARR[@]}"; do
-  tables_json=$(bq_table_type "$PROD_PROJECT" "$ds" "__all__" 2>/dev/null || true)
-  # If we queried __all__, it will be empty; instead list via INFORMATION_SCHEMA.TABLES
-  list_json=$(bq_json "$PROD_PROJECT" "SELECT table_name, table_type FROM \`$PROD_PROJECT.$ds\`.INFORMATION_SCHEMA.TABLES") || true
-  if [[ -z "$list_json" ]]; then
-    echo "[warn] Could not list tables in $PROD_PROJECT.$ds (no access?)" >> "$orphans_md"
-    continue
+  # Build coverage set from manifest (prefer prod manifest, else PR manifest)
+  manifest_for_orphans="$PR_MANIFEST"
+  if [[ -f "$PROD_MANIFEST" ]]; then
+    manifest_for_orphans="$PROD_MANIFEST"
   fi
-  while IFS= read -r name; do
-    key="$ds.$name"
-    if [[ -z "${covered[$key]:-}" ]]; then
-      orphans+=("$PROD_PROJECT.$ds.$name")
-    fi
-  done < <(echo "$list_json" | jq -r '.[].table_name')
-done
 
-echo "Found ${#orphans[@]} orphan(s)." >> "$orphans_md"
-if (( ${#orphans[@]} > 0 )); then
-  echo "" >> "$orphans_md"
-  echo "## Examples" >> "$orphans_md"
-  for o in "${orphans[@]:0:50}"; do
-    echo "- $o" >> "$orphans_md"
+  coverage=$(jq -r '
+    def model_key($p): (.schema + "." + ((.alias // .name) // ""));
+    def source_key($p): (.schema + "." + ((.identifier // .name) // ""));
+    [
+      (.nodes | to_entries[] | .value | select(.resource_type=="model") | model_key(.)) ,
+      (.sources | to_entries[] | .value | source_key(.))
+    ] | flatten | unique | .[]' "$manifest_for_orphans" 2>/dev/null || true)
+
+  declare -A covered
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && covered["$line"]=1
+  done <<< "$coverage"
+
+  # Explicitly initialized: `declare -a orphans` alone leaves the array unset,
+  # and `${#orphans[@]}` on an unset array is an unbound-variable error under
+  # `set -u` even on bash 5 (the 4.4 relaxation covers ${a[@]}, not ${#a[@]}).
+  declare -a orphans=()
+  for ds in "${PROD_DATASETS_ARR[@]}"; do
+    list_json=$(bq_json "$PROD_PROJECT" "SELECT table_name, table_type FROM \`$PROD_PROJECT.$ds\`.INFORMATION_SCHEMA.TABLES") || true
+    if [[ -z "$list_json" ]]; then
+      echo "[warn] Could not list tables in $PROD_PROJECT.$ds (no access?)" >> "$orphans_md"
+      continue
+    fi
+    # Guard the parse: bq can emit banner text that is not valid JSON.
+    table_names=$(printf '%s' "$list_json" | jq -r '.[].table_name' 2>/dev/null) || true
+    if [[ -z "$table_names" ]]; then
+      echo "[warn] Could not parse table list for $PROD_PROJECT.$ds" >> "$orphans_md"
+      continue
+    fi
+    while IFS= read -r name; do
+      [[ -z "$name" ]] && continue
+      key="$ds.$name"
+      if [[ -z "${covered[$key]:-}" ]]; then
+        orphans+=("$PROD_PROJECT.$ds.$name")
+      fi
+    done <<< "$table_names"
   done
-fi
+
+  echo "Found ${#orphans[@]} orphan(s)." >> "$orphans_md"
+  if (( ${#orphans[@]} > 0 )); then
+    echo "" >> "$orphans_md"
+    echo "## Examples" >> "$orphans_md"
+    for o in "${orphans[@]:0:50}"; do
+      echo "- $o" >> "$orphans_md"
+    done
+  fi
+) || echo "[warn] Orphan detection encountered errors; see $orphans_md" >&2
 
 echo "Schema diff reports written to $ARTIFACT_DIR/"
 exit 0
