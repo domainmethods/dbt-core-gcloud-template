@@ -536,7 +536,7 @@ orphans_md="$ARTIFACT_DIR/orphans.md"
       (.sources | to_entries[] | .value | source_key(.))
     ] | flatten | unique | .[]' "$manifest_for_orphans" 2>/dev/null || true)
 
-  declare -A covered
+  declare -A covered=()
   while IFS= read -r line; do
     [[ -n "$line" ]] && covered["$line"]=1
   done <<< "$coverage"

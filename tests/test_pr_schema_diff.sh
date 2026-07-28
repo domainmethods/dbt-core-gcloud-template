@@ -408,7 +408,7 @@ scenario_10() {
   # package's pkg_fct_example, and no query may carry a concatenated name.
   assert_contains "$(cat "$SANDBOX/out/fct_example.txt")" "Dev:  ciproj.ci_pr_1.fct_example" \
     "the project's own node wins over the package node"
-  assert_not_contains "$(cat "$BQ_CALL_LOG")" "pkg_fct_example" \
+  assert_not_contains "$(cat "$BQ_CALL_LOG")" "pkg_schema" \
     "the package node is not queried"
   local rows; rows=$(grep -c '^| [a-z]' "$SANDBOX/out/schema-summary.md")
   assert_eq 2 "$rows" "still one summary row per selected model"
