@@ -102,11 +102,15 @@ make_sandbox() {
     *)     echo "unknown prod_manifest mode: $prod_manifest" >&2; exit 1 ;;
   esac
 
+  printf 'fct_example\nstg_example\n' > "$SANDBOX/models.txt"
+
   cat > "$SANDBOX/stubs/dbt" <<'STUB'
 #!/usr/bin/env bash
 # Only `dbt ls` is exercised; every other subcommand is a no-op success.
+# The model list lives in models.txt in the sandbox (which is the cwd of the
+# script under test) so a test can extend it without rewriting this stub.
 if [[ "${1:-}" == "ls" ]]; then
-  printf 'fct_example\nstg_example\n'
+  cat models.txt
 fi
 exit 0
 STUB
@@ -115,18 +119,31 @@ STUB
 #!/usr/bin/env bash
 # Stub BigQuery CLI. Records every invocation, then answers based on the
 # shape of the SQL and on STUB_MODE.
+#
+# The script queries WHOLE DATASETS, not single tables, so every fixture below
+# is a dataset-wide result carrying table_name. Narrowing to one table is the
+# script's job; answering per table here would hide a filtering bug.
 args="$*"
 echo "$args" >> "$BQ_CALL_LOG"
 
-DEV_COLS='[{"column_name":"id","ordinal_position":1,"data_type":"INT64","is_nullable":"YES"},{"column_name":"amount","ordinal_position":2,"data_type":"NUMERIC","is_nullable":"YES"}]'
-PROD_COLS='[{"column_name":"id","ordinal_position":1,"data_type":"INT64","is_nullable":"YES"}]'
+DEV_COLS='[{"table_name":"fct_example","column_name":"id","ordinal_position":1,"data_type":"INT64","is_nullable":"YES"},{"table_name":"fct_example","column_name":"amount","ordinal_position":2,"data_type":"NUMERIC","is_nullable":"YES"},{"table_name":"stg_example","column_name":"id","ordinal_position":1,"data_type":"INT64","is_nullable":"YES"},{"table_name":"stg_example","column_name":"amount","ordinal_position":2,"data_type":"NUMERIC","is_nullable":"YES"}]'
+PROD_COLS='[{"table_name":"fct_example","column_name":"id","ordinal_position":1,"data_type":"INT64","is_nullable":"YES"}]'
 
 # col_diff mode: a deliberate, non-trivial difference on fct_example.
 #   added   -> created_at (dev only)
 #   removed -> legacy_flag (prod only)
 #   changed -> amount (NUMERIC in prod, STRING in dev)
-DIFF_DEV_COLS='[{"column_name":"id","ordinal_position":1,"data_type":"INT64","is_nullable":"YES"},{"column_name":"amount","ordinal_position":2,"data_type":"STRING","is_nullable":"YES"},{"column_name":"created_at","ordinal_position":3,"data_type":"TIMESTAMP","is_nullable":"YES"}]'
-DIFF_PROD_COLS='[{"column_name":"id","ordinal_position":1,"data_type":"INT64","is_nullable":"YES"},{"column_name":"amount","ordinal_position":2,"data_type":"NUMERIC","is_nullable":"YES"},{"column_name":"legacy_flag","ordinal_position":3,"data_type":"BOOL","is_nullable":"YES"}]'
+# stg_example keeps its two plain dev columns and has no prod counterpart.
+DIFF_DEV_COLS='[{"table_name":"fct_example","column_name":"id","ordinal_position":1,"data_type":"INT64","is_nullable":"YES"},{"table_name":"fct_example","column_name":"amount","ordinal_position":2,"data_type":"STRING","is_nullable":"YES"},{"table_name":"fct_example","column_name":"created_at","ordinal_position":3,"data_type":"TIMESTAMP","is_nullable":"YES"},{"table_name":"stg_example","column_name":"id","ordinal_position":1,"data_type":"INT64","is_nullable":"YES"},{"table_name":"stg_example","column_name":"amount","ordinal_position":2,"data_type":"NUMERIC","is_nullable":"YES"}]'
+DIFF_PROD_COLS='[{"table_name":"fct_example","column_name":"id","ordinal_position":1,"data_type":"INT64","is_nullable":"YES"},{"table_name":"fct_example","column_name":"amount","ordinal_position":2,"data_type":"NUMERIC","is_nullable":"YES"},{"table_name":"fct_example","column_name":"legacy_flag","ordinal_position":3,"data_type":"BOOL","is_nullable":"YES"}]'
+
+# per_model_cols mode: two models in the SAME dataset with disjoint extra
+# columns. Each must see only its own. Returning the whole dataset's columns —
+# the obvious batching bug — shows up immediately as the other model's column.
+PM_DEV_COLS='[{"table_name":"fct_example","column_name":"id","ordinal_position":1,"data_type":"INT64","is_nullable":"YES"},{"table_name":"fct_example","column_name":"fct_only_col","ordinal_position":2,"data_type":"INT64","is_nullable":"YES"},{"table_name":"stg_example","column_name":"id","ordinal_position":1,"data_type":"INT64","is_nullable":"YES"},{"table_name":"stg_example","column_name":"stg_only_col","ordinal_position":2,"data_type":"STRING","is_nullable":"YES"}]'
+PM_PROD_COLS='[{"table_name":"fct_example","column_name":"id","ordinal_position":1,"data_type":"INT64","is_nullable":"YES"},{"table_name":"stg_example","column_name":"id","ordinal_position":1,"data_type":"INT64","is_nullable":"YES"}]'
+
+BOTH_TABLES='[{"table_name":"fct_example","table_type":"BASE TABLE"},{"table_name":"stg_example","table_type":"BASE TABLE"}]'
 
 is_dev() { [[ "$args" == *ci_pr_1* ]]; }
 
@@ -146,43 +163,39 @@ case "$args" in
       echo 'BigQuery error in query operation: Access Denied: Dataset prodproj:analytics' >&2
       exit 1
     elif is_dev; then
-      if [[ "$STUB_MODE" == "col_diff" && "$args" == *"table_name = 'fct_example'"* ]]; then
-        echo "$DIFF_DEV_COLS"
-      else
-        echo "$DEV_COLS"
-      fi
-    elif [[ "$args" == *"table_name = 'fct_example'"* ]]; then
-      if [[ "$STUB_MODE" == "col_diff" ]]; then
-        echo "$DIFF_PROD_COLS"
-      else
-        echo "$PROD_COLS"
-      fi
+      case "$STUB_MODE" in
+        col_diff)       echo "$DIFF_DEV_COLS" ;;
+        per_model_cols) echo "$PM_DEV_COLS" ;;
+        *)              echo "$DEV_COLS" ;;
+      esac
     else
-      echo '[]'
+      case "$STUB_MODE" in
+        col_diff)       echo "$DIFF_PROD_COLS" ;;
+        per_model_cols) echo "$PM_PROD_COLS" ;;
+        *)              echo "$PROD_COLS" ;;
+      esac
     fi ;;
 
-  *"INFORMATION_SCHEMA.TABLES WHERE"*)
+  *INFORMATION_SCHEMA.TABLES*)
+    # One dataset-wide listing now serves BOTH the batched table-type lookup and
+    # the orphan report: they are byte-identical queries and deliberately share
+    # a cache entry, so there is nothing left to dispatch between.
     if [[ "$STUB_MODE" == "prod_type_denied" ]] && ! is_dev; then
       # COLUMNS succeeds, TABLES is denied: without classification this used to
       # surface as NEW_MODEL ("nothing to compare") instead of a failure.
       echo 'BigQuery error in query operation: Access Denied: Dataset prodproj:analytics' >&2
       exit 1
     elif is_dev; then
-      echo '[{"table_type":"BASE TABLE"}]'
-    elif [[ "$args" == *"table_name = 'fct_example'"* ]]; then
-      echo '[{"table_type":"BASE TABLE"}]'
+      echo "$BOTH_TABLES"
     else
-      echo '[]'
+      case "$STUB_MODE" in
+        denied)         echo 'BigQuery error: Access Denied' >&2; exit 1 ;;
+        has_orphan)     echo '[{"table_name":"legacy_junk","table_type":"BASE TABLE"}]' ;;
+        banner_tables)  echo 'Welcome to BigQuery! Update available.' ;;
+        per_model_cols) echo "$BOTH_TABLES" ;;
+        *)              echo '[{"table_name":"fct_example","table_type":"BASE TABLE"}]' ;;
+      esac
     fi ;;
-
-  *INFORMATION_SCHEMA.TABLES*)
-    # Dataset-wide table listing, used only by the orphan block.
-    case "$STUB_MODE" in
-      denied)        echo 'BigQuery error: Access Denied' >&2; exit 1 ;;
-      has_orphan)    echo '[{"table_name":"legacy_junk","table_type":"BASE TABLE"}]' ;;
-      banner_tables) echo 'Welcome to BigQuery! Update available.' ;;
-      *)             echo '[{"table_name":"fct_example","table_type":"BASE TABLE"}]' ;;
-    esac ;;
 
   *)
     echo '[]' ;;
@@ -487,6 +500,158 @@ scenario_13() {
   cleanup
 }
 
+# Adds $1 extra models, all in the same dev and prod datasets as the fixture
+# pair. Used to prove the query count is a function of dataset count, not of
+# model count.
+add_extra_models() {
+  local n=$1 mf i
+  for mf in "$SANDBOX/target/manifest.json" "$SANDBOX/prod_state/manifest.json"; do
+    [[ -f "$mf" ]] || continue
+    for ((i = 1; i <= n; i++)); do
+      jq --arg id "model.tpl.extra_$i" --arg nm "extra_$i" \
+        '.nodes[$id] = {resource_type: "model", name: $nm, alias: $nm,
+                        database: "prodproj", schema: "analytics",
+                        unique_id: $id}' "$mf" > "$mf.tmp" && mv "$mf.tmp" "$mf"
+    done
+  done
+  for ((i = 1; i <= n; i++)); do
+    echo "extra_$i" >> "$SANDBOX/models.txt"
+  done
+}
+
+bq_call_count() { grep -c . "$BQ_CALL_LOG"; }
+
+scenario_14() {
+  echo "  scenario 14: query volume is per dataset, not per model"
+  # Before batching this loop issued six queries per model plus one dataset
+  # listing: 13 for this two-model fixture, 241 at the real CI selection size of
+  # 40 models, against a step capped at timeout-minutes: 10.
+  #
+  # Two datasets are touched — the CI dataset and prod — at three queries each.
+  # The orphan report's table listing is the same query as the batched one and
+  # shares its cache entry, so it adds nothing.
+  make_sandbox ok_no_orphans
+  run_diff; local rc=$?
+  assert_eq 0 "$rc" "exits 0"
+  local two_model_calls; two_model_calls=$(bq_call_count)
+  assert_eq 6 "$two_model_calls" "two models cost 3 queries per dataset across 2 datasets"
+  assert_eq 2 "$(grep -c 'INFORMATION_SCHEMA.TABLES' "$BQ_CALL_LOG")" \
+    "the orphan listing reuses the batched TABLES query instead of repeating it"
+  cleanup
+
+  # The load-bearing half: the SAME count with six times the models. An
+  # implementation that merely lowered the constant would pass an absolute
+  # threshold and fail here.
+  make_sandbox ok_no_orphans
+  add_extra_models 10
+  run_diff; rc=$?
+  assert_eq 0 "$rc" "exits 0 with twelve models"
+  local rows; rows=$(grep -c '^| [a-z]' "$SANDBOX/out/schema-summary.md")
+  assert_eq 12 "$rows" "all twelve models are actually processed"
+  local twelve_model_calls; twelve_model_calls=$(bq_call_count)
+  assert_eq "$two_model_calls" "$twelve_model_calls" \
+    "query count does not scale with model count"
+  assert_eq 6 "$twelve_model_calls" "twelve models still cost 6 queries"
+  cleanup
+}
+
+scenario_15() {
+  echo "  scenario 15: each model sees only its own columns"
+  # Two models in one dataset with disjoint extra columns. The batching bug this
+  # guards against is handing every model the whole dataset's columns, or the
+  # first table's.
+  make_sandbox per_model_cols
+  run_diff; local rc=$?
+  assert_eq 0 "$rc" "exits 0"
+
+  local fct stg
+  fct=$(cat "$SANDBOX/out/fct_example.txt")
+  stg=$(cat "$SANDBOX/out/stg_example.txt")
+
+  assert_contains "$fct" "+ fct_only_col" "fct_example reports its own added column"
+  assert_not_contains "$fct" "stg_only_col" "fct_example never sees the other table's column"
+  assert_contains "$stg" "+ stg_only_col" "stg_example reports its own added column"
+  assert_not_contains "$stg" "fct_only_col" "stg_example never sees the other table's column"
+
+  assert_contains "$(summary_line_for fct_example)" "|added=1|removed=0|changed=0|" \
+    "fct_example counts only its own column difference"
+  assert_contains "$(summary_line_for stg_example)" "|added=1|removed=0|changed=0|" \
+    "stg_example counts only its own column difference"
+  assert_contains "$(summary_line_for fct_example)" "|status=OK|" \
+    "fct_example is a clean comparison, not NEW_MODEL"
+  assert_contains "$(summary_line_for stg_example)" "|status=OK|" \
+    "stg_example is a clean comparison, not NEW_MODEL"
+  cleanup
+}
+
+scenario_16() {
+  echo "  scenario 16: a dataset-wide failure reaches every model in it"
+  # The blob is fetched once now, so the failure happens once. Every model in
+  # that dataset must still classify exactly as it did when each issued its own
+  # query. Filtering a non-JSON blob instead of passing it through verbatim
+  # would turn a permissions failure into a clean OK diff on every row.
+  make_sandbox prod_denied
+  run_diff; local rc=$?
+  assert_eq 0 "$rc" "exits 0 when the prod dataset fetch is denied"
+  local summary; summary=$(cat "$SANDBOX/out/schema-summary.md")
+  assert_contains "$(summary_line_for fct_example)" "|status=AUTH_ERROR|" \
+    "first model in the denied dataset is AUTH_ERROR"
+  assert_contains "$(summary_line_for stg_example)" "|status=AUTH_ERROR|" \
+    "second model in the denied dataset is AUTH_ERROR too, not OK"
+  assert_not_contains "$summary" "NEW_MODEL" \
+    "no model in a denied dataset is downgraded to NEW_MODEL"
+  assert_not_contains "$summary" "| OK |" \
+    "no model in a denied dataset is downgraded to OK"
+  assert_eq 1 "$(grep -c 'prodproj.analytics..INFORMATION_SCHEMA.COLUMNS' "$BQ_CALL_LOG")" \
+    "the denied fetch is cached, not retried once per model"
+  cleanup
+
+  # Same requirement for a denial printed on stdout with exit 0, which reaches
+  # the classifier as an "Access Denied" substring rather than as emptiness.
+  make_sandbox dev_denied
+  run_diff; rc=$?
+  assert_eq 0 "$rc" "exits 0 when the dev dataset fetch is denied on stdout"
+  assert_contains "$(summary_line_for fct_example)" "|status=AUTH_ERROR|" \
+    "first model sees the Access Denied string"
+  assert_contains "$(summary_line_for stg_example)" "|status=AUTH_ERROR|" \
+    "second model sees the Access Denied string too"
+  cleanup
+
+  # A non-JSON blob that is NOT a denial pins the passthrough precisely: it can
+  # only reach the classifier as NON_JSON if the helper hands it back untouched.
+  # jq-filtering it instead yields empty (which classifies AUTH_ERROR) and
+  # normalizing it first yields [] (which classifies OK) — both wrong, and both
+  # indistinguishable from correct behaviour on a denial alone.
+  make_sandbox banner_introspect
+  run_diff; rc=$?
+  assert_eq 0 "$rc" "exits 0 on a dataset-wide banner"
+  assert_contains "$(summary_line_for fct_example)" "|status=NON_JSON|" \
+    "first model in the dataset sees the banner verbatim"
+  assert_contains "$(summary_line_for stg_example)" "|status=NON_JSON|" \
+    "second model in the dataset sees the banner verbatim, not empty and not []"
+  cleanup
+}
+
+scenario_17() {
+  echo "  scenario 17: dev and prod datasets do not share a cache entry"
+  # A cache keyed on anything less than (project, dataset) would serve the dev
+  # blob for prod, and the diff would silently collapse to zero.
+  make_sandbox ok_no_orphans
+  run_diff; local rc=$?
+  assert_eq 0 "$rc" "exits 0"
+
+  # dev has `amount`, prod does not.
+  assert_contains "$(summary_line_for fct_example)" "|added=1|removed=0|changed=0|" \
+    "the dev/prod difference survives caching"
+  assert_contains "$(cat "$SANDBOX/out/fct_example.txt")" "+ amount" \
+    "the column present only in dev is named"
+  assert_eq 1 "$(grep -c 'ciproj.ci_pr_1..INFORMATION_SCHEMA.COLUMNS' "$BQ_CALL_LOG")" \
+    "the dev dataset is fetched exactly once"
+  assert_eq 1 "$(grep -c 'prodproj.analytics..INFORMATION_SCHEMA.COLUMNS' "$BQ_CALL_LOG")" \
+    "the prod dataset is fetched exactly once, separately"
+  cleanup
+}
+
 echo "test_pr_schema_diff.sh"
 scenario_1
 scenario_2
@@ -501,6 +666,10 @@ scenario_10
 scenario_11
 scenario_12
 scenario_13
+scenario_14
+scenario_15
+scenario_16
+scenario_17
 
 echo ""
 echo "passed: $PASS_COUNT  failed: $FAIL_COUNT"

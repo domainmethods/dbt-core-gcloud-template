@@ -119,27 +119,124 @@ bq_json() {
   echo "$out"
 }
 
+# Returns 0 if the argument parses as a JSON array.
+is_json_array() {
+  [[ -n "${1:-}" ]] && printf '%s' "$1" | jq -e 'type=="array"' >/dev/null 2>&1
+}
+
+# --- Dataset-wide INFORMATION_SCHEMA cache -------------------------------
+#
+# The per-model loop asks six questions per model. Asked per model that is
+# 6 * N queries (241 at the real CI selection size of 40 models), each one a
+# fresh `bq` process plus an API round trip, against a step capped at
+# timeout-minutes: 10. Asked per (project, dataset) it is 3 queries per dataset
+# — 6 for a typical dev+prod run — regardless of model count.
+#
+# So: query the whole dataset once, cache the RAW output, and filter per model
+# locally with jq. The three helpers below keep their original signatures and
+# still echo a JSON array for one table, so the call sites and the status
+# classification block are untouched.
+#
+# Declared initialized. A bare `declare -A` leaves the array unset, and reading
+# an unset array under `set -u` is the class of defect this file was fixed for.
+# Loaded-ness is tracked separately from content so a genuinely empty result is
+# distinguishable from "not fetched yet" — a failed fetch caches as an empty
+# string and must NOT be retried per model, or the query volume comes back.
+declare -A DS_LOADED=()
+declare -A DS_COLS=()
+declare -A DS_TBL=()
+declare -A DS_OPT=()
+
+ensure_columns_cached() {
+  local project=$1 dataset=$2 key="$1.$2"
+  if [[ -z "${DS_LOADED[cols:$key]:-}" ]]; then
+    DS_LOADED[cols:$key]=1
+    DS_COLS[$key]=$(bq_json "$project" "SELECT table_name, column_name, ordinal_position, data_type, is_nullable FROM \`$project.$dataset\`.INFORMATION_SCHEMA.COLUMNS ORDER BY table_name, ordinal_position" || true)
+  fi
+  return 0
+}
+
+ensure_tables_cached() {
+  local project=$1 dataset=$2 key="$1.$2"
+  if [[ -z "${DS_LOADED[tbl:$key]:-}" ]]; then
+    DS_LOADED[tbl:$key]=1
+    DS_TBL[$key]=$(bq_json "$project" "SELECT table_name, table_type FROM \`$project.$dataset\`.INFORMATION_SCHEMA.TABLES" || true)
+  fi
+  return 0
+}
+
+ensure_options_cached() {
+  local project=$1 dataset=$2 key="$1.$2"
+  if [[ -z "${DS_LOADED[opt:$key]:-}" ]]; then
+    DS_LOADED[opt:$key]=1
+    DS_OPT[$key]=$(bq_json "$project" "SELECT table_name, option_name, option_value FROM \`$project.$dataset\`.INFORMATION_SCHEMA.TABLE_OPTIONS WHERE option_name IN ('partitioning_type','partitioning_field','require_partition_filter','clustering_fields')" || true)
+  fi
+  return 0
+}
+
+# Warms all three blobs for one (project, dataset) pair.
+#
+# This MUST be called as a plain statement from the shell that owns the cache.
+# The helpers below are invoked as `x=$(bq_columns ...)`, i.e. inside command
+# substitutions, which are subshells: anything they cache dies with them. A
+# lazy load driven only from inside the helpers would therefore never survive a
+# single model and the query count would be worse than before batching.
+ensure_dataset_cached() {
+  local project=$1 dataset=$2
+  ensure_columns_cached "$project" "$dataset"
+  ensure_tables_cached "$project" "$dataset"
+  ensure_options_cached "$project" "$dataset"
+  return 0
+}
+
+# Filters a cached dataset-wide blob down to one table.
+#
+# ERROR PASSTHROUGH — the load-bearing part. Status classification reads the
+# raw bq output and tests it as a string ("Access Denied", empty, banner text).
+# Before batching each model triggered its own query and so saw the failure
+# directly. Now the failure happens once, at load time, for the whole dataset.
+# A blob that is not a JSON array is therefore handed back VERBATIM to every
+# model in that dataset, so each one classifies exactly as it would have. Try
+# to jq-filter it instead and jq fails, the helper emits an empty array, and a
+# whole dataset's permissions failure turns into a clean OK diff on every row.
+ds_filter() {
+  local raw=${1:-} ident=$2 projection=$3
+  if ! is_json_array "$raw"; then
+    printf '%s' "$raw"
+    return 0
+  fi
+  printf '%s' "$raw" | jq -c --arg t "$ident" "[ .[] | select(.table_name == \$t) | $projection ]"
+}
+
 bq_columns() {
   local project=$1 dataset=$2 ident=$3
-  local sql="SELECT column_name, ordinal_position, data_type, is_nullable FROM \`$project.$dataset\`.INFORMATION_SCHEMA.COLUMNS WHERE table_name = '$ident' ORDER BY ordinal_position"
-  bq_json "$project" "$sql"
+  ensure_columns_cached "$project" "$dataset"
+  ds_filter "${DS_COLS[$project.$dataset]:-}" "$ident" \
+    '{column_name, ordinal_position, data_type, is_nullable}'
 }
 
 bq_table_type() {
   local project=$1 dataset=$2 ident=$3
-  local sql="SELECT table_type FROM \`$project.$dataset\`.INFORMATION_SCHEMA.TABLES WHERE table_name = '$ident'"
-  bq_json "$project" "$sql"
+  ensure_tables_cached "$project" "$dataset"
+  ds_filter "${DS_TBL[$project.$dataset]:-}" "$ident" '{table_type}'
 }
 
 bq_table_options() {
   local project=$1 dataset=$2 ident=$3
-  local sql="SELECT option_name, option_value FROM \`$project.$dataset\`.INFORMATION_SCHEMA.TABLE_OPTIONS WHERE table_name = '$ident' AND option_name IN ('partitioning_type','partitioning_field','require_partition_filter','clustering_fields')"
-  bq_json "$project" "$sql"
+  ensure_options_cached "$project" "$dataset"
+  ds_filter "${DS_OPT[$project.$dataset]:-}" "$ident" '{option_name, option_value}'
 }
 
-# Returns 0 if the argument parses as a JSON array.
-is_json_array() {
-  [[ -n "${1:-}" ]] && printf '%s' "$1" | jq -e 'type=="array"' >/dev/null 2>&1
+# Raw dataset-wide TABLES listing, for the orphan report.
+#
+# The orphan block wants exactly what the batched TABLES query already fetched:
+# `SELECT table_name, table_type` over the whole dataset. The two are the same
+# query, so they deliberately SHARE one cache entry rather than being issued
+# twice. Returns the raw blob; the caller does its own guarded parse.
+bq_tables_raw() {
+  local project=$1 dataset=$2
+  ensure_tables_cached "$project" "$dataset"
+  printf '%s' "${DS_TBL[$project.$dataset]:-}"
 }
 
 # Classifies ONE raw bq result: OK | AUTH_ERROR | NON_JSON.
@@ -315,6 +412,14 @@ for m in "${MODELS[@]}"; do
     echo "Movement: $move" | tee -a "$out"
   fi
 
+  # Warm the dataset-wide cache in THIS shell, before the six calls below. Each
+  # of those runs inside a command substitution — a subshell — so a cache it
+  # populates is discarded the moment it returns. Warming here is what makes the
+  # cache survive from one model to the next; without it every model would
+  # re-query and batching would buy nothing.
+  ensure_dataset_cached "$DEV_P" "$DEV_D"
+  ensure_dataset_cached "$PROD_P" "$PROD_D"
+
   # Introspect
   dev_cols_json=$(bq_columns "$DEV_P" "$DEV_D" "$DEV_T" 2>/dev/null || true)
   prod_cols_json=$(bq_columns "$PROD_P" "$PROD_D" "$PROD_T" 2>/dev/null || true)
@@ -441,7 +546,10 @@ orphans_md="$ARTIFACT_DIR/orphans.md"
   # `set -u` even on bash 5 (the 4.4 relaxation covers ${a[@]}, not ${#a[@]}).
   declare -a orphans=()
   for ds in "${PROD_DATASETS_ARR[@]}"; do
-    list_json=$(bq_json "$PROD_PROJECT" "SELECT table_name, table_type FROM \`$PROD_PROJECT.$ds\`.INFORMATION_SCHEMA.TABLES") || true
+    # Same query as the batched TABLES fetch, so it reuses that cache entry
+    # instead of issuing a duplicate. For a prod dataset the model loop already
+    # visited this costs nothing.
+    list_json=$(bq_tables_raw "$PROD_PROJECT" "$ds") || true
     if [[ -z "$list_json" ]]; then
       echo "[warn] Could not list tables in $PROD_PROJECT.$ds (no access?)" >> "$orphans_md"
       continue
