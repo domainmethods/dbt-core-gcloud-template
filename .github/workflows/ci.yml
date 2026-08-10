@@ -54,12 +54,7 @@ jobs:
 
       - name: Detect changed dbt files
         id: changes
-        run: |
-          bash scripts/get_changed_models.sh | tee /tmp/get_changed_models.out
-          # Only forward genuine KEY=VALUE lines to $GITHUB_ENV — the script's
-          # log output (headers, indented file lists) is not env-file-safe and
-          # would otherwise corrupt the file / fail the step.
-          grep -E '^[A-Za-z_][A-Za-z0-9_]*=' /tmp/get_changed_models.out >> "$GITHUB_ENV"
+        run: bash scripts/get_changed_models.sh
 
       - id: auth
         uses: google-github-actions/auth@v2

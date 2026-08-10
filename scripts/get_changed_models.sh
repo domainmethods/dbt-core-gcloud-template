@@ -38,15 +38,27 @@ done <<< "$CHANGED_FILES"
 
 CHANGED_MODELS=$(echo "$CHANGED_MODELS" | xargs)  # trim whitespace
 
+# Build the dbt selector: one 'name+' token per changed model (model + downstream).
+# Empty when no model files changed (e.g. docs-only), so the HAS_MODEL_CHANGES=false
+# skip still governs downstream.
+DIFF_SELECT=""
+for model_name in ${CHANGED_MODELS}; do
+  DIFF_SELECT="${DIFF_SELECT} ${model_name}+"
+done
+DIFF_SELECT=$(echo "$DIFF_SELECT" | xargs)  # trim whitespace
+
 echo ""
 echo "HAS_MODEL_CHANGES=${HAS_MODEL_CHANGES}"
 echo "CHANGED_MODELS=${CHANGED_MODELS:-<none>}"
+echo "DIFF_SELECT=${DIFF_SELECT:-<none>}"
 
 # Export to GitHub Actions env/output if available
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   echo "HAS_MODEL_CHANGES=${HAS_MODEL_CHANGES}" >> "$GITHUB_ENV"
+  echo "DIFF_SELECT=${DIFF_SELECT}" >> "$GITHUB_ENV"
 fi
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   echo "has_model_changes=${HAS_MODEL_CHANGES}" >> "$GITHUB_OUTPUT"
   echo "changed_models=${CHANGED_MODELS}" >> "$GITHUB_OUTPUT"
+  echo "diff_select=${DIFF_SELECT}" >> "$GITHUB_OUTPUT"
 fi
