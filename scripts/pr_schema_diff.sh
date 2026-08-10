@@ -22,6 +22,12 @@ DEV_DATASET=${DBT_BQ_DATASET:?set DBT_BQ_DATASET}
 PROD_PROJECT=${DBT_GCP_PROJECT_PROD:-$DEV_PROJECT}
 DEFAULT_PROD_DATASET=${DBT_BQ_DATASET_PROD:-analytics}
 
+# Docs/config-only PRs change no models — skip the diff entirely (no jq/bq/dbt work).
+if [[ "${HAS_MODEL_CHANGES:-true}" == "false" ]]; then
+  echo "No dbt model changes detected in this PR. No models for schema diff."
+  exit 0
+fi
+
 command -v jq >/dev/null || {
   echo "[warn] jq not found; schema diff requires jq. Skipping." >&2
   exit 0
@@ -55,7 +61,11 @@ fi
 
 echo ""
 echo "=== Model Selection ==="
-if [[ -f "$PROD_MANIFEST" ]]; then
+if [[ -n "${DIFF_SELECT:-}" ]]; then
+  echo "Using git-diff scope: ${DIFF_SELECT}"
+  # DIFF_SELECT is intentionally unquoted so multiple 'name+' tokens expand as separate args.
+  mapfile -t MODELS < <(dbt ls --select ${DIFF_SELECT} --resource-type model --output name --quiet 2>/dev/null || true)
+elif [[ -f "$PROD_MANIFEST" ]]; then
   mapfile -t MODELS < <(dbt ls --select "state:modified+" --state prod_state --resource-type model --output name --quiet 2>/dev/null || true)
   if (( ${#MODELS[@]} == 0 )); then
     echo "  (none - no models changed)"

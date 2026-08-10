@@ -91,8 +91,10 @@ make_sandbox() {
   SANDBOX=$(mktemp -d)
   STUB_MODE=$mode
   BQ_CALL_LOG="$SANDBOX/bq_calls.log"
+  DBT_CALL_LOG="$SANDBOX/dbt_calls.log"
   mkdir -p "$SANDBOX/stubs" "$SANDBOX/target" "$SANDBOX/prod_state" "$SANDBOX/out"
   : > "$BQ_CALL_LOG"
+  : > "$DBT_CALL_LOG"
 
   write_manifest "$SANDBOX/target/manifest.json"
   case "$prod_manifest" in
@@ -109,6 +111,9 @@ make_sandbox() {
 # Only `dbt ls` is exercised; every other subcommand is a no-op success.
 # The model list lives in models.txt in the sandbox (which is the cwd of the
 # script under test) so a test can extend it without rewriting this stub.
+# Every invocation is logged verbatim so tests can assert on the exact
+# selection args (e.g. --select fct_example+ vs state:modified+).
+echo "dbt $*" >> "$DBT_CALL_LOG"
 if [[ "${1:-}" == "ls" ]]; then
   cat models.txt
 fi
@@ -215,6 +220,9 @@ run_diff() {
     PATH="$SANDBOX/stubs:$PATH" \
     STUB_MODE="$STUB_MODE" \
     BQ_CALL_LOG="$BQ_CALL_LOG" \
+    DBT_CALL_LOG="$DBT_CALL_LOG" \
+    HAS_MODEL_CHANGES="${HAS_MODEL_CHANGES:-true}" \
+    DIFF_SELECT="${DIFF_SELECT:-}" \
     DBT_GCP_PROJECT_CI=ciproj \
     DBT_BQ_DATASET=ci_pr_1 \
     DBT_GCP_PROJECT_PROD=prodproj \
@@ -652,6 +660,29 @@ scenario_17() {
   cleanup
 }
 
+scenario_18() {
+  echo "  scenario 18: docs-only (HAS_MODEL_CHANGES=false) produces no schema diff"
+  make_sandbox ok_no_orphans
+  HAS_MODEL_CHANGES=false run_diff; local rc=$?
+  unset HAS_MODEL_CHANGES
+  assert_eq 0 "$rc" "exits 0 on docs-only PRs"
+  assert_contains "$RUN_STDOUT" "No models" "schema diff exits early on docs-only"
+  assert_not_contains "$(cat "$DBT_CALL_LOG")" "ls" "never calls dbt ls on docs-only PRs"
+  assert_eq 0 "$(grep -c . "$BQ_CALL_LOG")" "never calls bq on docs-only PRs"
+  cleanup
+}
+
+scenario_19() {
+  echo "  scenario 19: DIFF_SELECT is honoured over state:modified+"
+  make_sandbox ok_no_orphans
+  HAS_MODEL_CHANGES=true DIFF_SELECT=fct_example+ run_diff; local rc=$?
+  unset HAS_MODEL_CHANGES DIFF_SELECT
+  assert_eq 0 "$rc" "exits 0"
+  assert_contains "$(cat "$DBT_CALL_LOG")" "ls --select fct_example+" "schema diff uses DIFF_SELECT"
+  assert_not_contains "$(cat "$DBT_CALL_LOG")" "state:modified+" "does not fall back to state:modified+ when DIFF_SELECT is set"
+  cleanup
+}
+
 echo "test_pr_schema_diff.sh"
 scenario_1
 scenario_2
@@ -670,6 +701,8 @@ scenario_14
 scenario_15
 scenario_16
 scenario_17
+scenario_18
+scenario_19
 
 echo ""
 echo "passed: $PASS_COUNT  failed: $FAIL_COUNT"
