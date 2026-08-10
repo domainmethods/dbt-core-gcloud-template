@@ -19,6 +19,7 @@ jobs:
         run: |
           bash tests/test_pr_schema_diff.sh
           bash tests/test_pr_data_diff.sh
+          bash tests/test_get_changed_models.sh
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
