@@ -20,6 +20,7 @@ jobs:
           bash tests/test_pr_schema_diff.sh
           bash tests/test_pr_data_diff.sh
           bash tests/test_get_changed_models.sh
+          bash tests/test_ci_build.sh
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -98,6 +99,13 @@ jobs:
       - name: Slim CI build (with defer if prod manifest exists)
         id: dbt_build
         run: bash scripts/ci_build.sh
+
+      - name: Run dbt tests (non-blocking; does not gate diffs)
+        id: dbt_test
+        if: ${{ steps.dbt_build.outcome == 'success' && env.HAS_MODEL_CHANGES != 'false' }}
+        continue-on-error: true
+        run: |
+          dbt test --target ci ${CI_SELECT:+--select "$CI_SELECT"} ${CI_DEFER}
 
       - name: Source freshness (optional)
         if: ${{ steps.dbt_build.outcome == 'success' && env.RUN_FRESHNESS == 'true' }}

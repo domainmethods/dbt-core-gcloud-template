@@ -6,9 +6,28 @@ set -euo pipefail
 #   2. Has state + model changes     → Slim CI (state:modified+ with --defer)
 #   3. Has state, state selection fails → full build (fallback)
 #   4. No state available            → full build
+#
+# Every `dbt build` invocation below excludes the `test` resource type:
+# models are built without running dbt tests, and `dbt test` runs as a
+# separate, non-blocking CI step afterward. This decouples the diff-gate
+# (steps.dbt_build.outcome) from test outcome, so a single red data test no
+# longer suppresses the data/schema diffs (see Risks & Trade-offs — this
+# intentionally removes dbt's upstream test-blocking within a build).
+# CI_SELECT / CI_DEFER are exported to $GITHUB_ENV so the downstream
+# `dbt test` step can reuse the same model selection/defer state.
 
 mkdir -p prod_state
 HAS_STATE="false"
+
+# Writes CI_SELECT / CI_DEFER to $GITHUB_ENV (when present) so the
+# non-blocking `dbt test` step added after this one can reuse the same
+# model selection/defer state that was used for the build.
+export_ci_select_defer() {
+  if [[ -n "${GITHUB_ENV:-}" ]]; then
+    echo "CI_SELECT=${CI_SELECT:-}" >> "$GITHUB_ENV"
+    echo "CI_DEFER=${CI_DEFER:-}" >> "$GITHUB_ENV"
+  fi
+}
 
 echo "=== Slim CI State Detection ==="
 echo "DBT_ARTIFACTS_BUCKET: ${DBT_ARTIFACTS_BUCKET:-<unset>}"
@@ -64,20 +83,27 @@ if [[ "${HAS_STATE}" == "true" ]]; then
   dbt ls --select "state:modified+" --state prod_state --resource-type model --output name --target ci || {
     echo "Error running dbt ls with state selection, falling back to full build"
     echo "Running full build due to state selection error"
-    dbt build --target ci
+    dbt build --target ci --exclude-resource-type test
+    build_status=$?
+    CI_SELECT=""; CI_DEFER=""
+    export_ci_select_defer
     echo ""
     echo "=== Build Complete (full, state selection failed) ==="
-    exit $?
+    exit $build_status
   }
 
   echo ""
-  echo "Starting Slim CI build with defer..."
-  dbt build --target ci --select "state:modified+" --defer --state prod_state
+  echo "Starting Slim CI build with defer (models only; tests run separately)..."
+  dbt build --target ci --select "state:modified+" --defer --state prod_state --exclude-resource-type test
+  CI_SELECT="state:modified+"; CI_DEFER="--defer --state prod_state"
 else
   echo "No production state available, running full build"
   echo "All models will be built from scratch"
-  dbt build --target ci
+  dbt build --target ci --exclude-resource-type test
+  CI_SELECT=""; CI_DEFER=""
 fi
 
 echo ""
 echo "=== Build Complete ==="
+
+export_ci_select_defer
