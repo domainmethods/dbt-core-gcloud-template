@@ -57,6 +57,8 @@ GITHUB_ENV_FILE3="$SANDBOX3/github_env_3"; : > "$GITHUB_ENV_FILE3"
     GITHUB_ENV="$GITHUB_ENV_FILE3" DBT_ARTIFACTS_BUCKET="fake-bucket" \
     HAS_MODEL_CHANGES=true NEEDS_FALLBACK=false BUILD_SELECT="fct_a+" bash "$SCRIPT" >/dev/null 2>&1 )
 assert_contains "$(cat "$DBT_CALL_LOG")" "build --target ci --select fct_a+ --defer --state prod_state --exclude-resource-type test" "git-diff scoped build"
+assert_contains "$(cat "$GITHUB_ENV_FILE3")" "CI_SELECT=fct_a+" "CI_SELECT exported for scoped build"
+assert_contains "$(cat "$GITHUB_ENV_FILE3")" "CI_DEFER=--defer --state prod_state" "CI_DEFER exported for scoped build"
 
 echo "scenario: HAS_STATE + fallback + BUILD_SELECT → combined select"
 : > "$DBT_CALL_LOG"
@@ -69,6 +71,8 @@ GITHUB_ENV_FILE4="$SANDBOX4/github_env_4"; : > "$GITHUB_ENV_FILE4"
     GITHUB_ENV="$GITHUB_ENV_FILE4" DBT_ARTIFACTS_BUCKET="fake-bucket" \
     HAS_MODEL_CHANGES=true NEEDS_FALLBACK=true BUILD_SELECT="fct_a+" bash "$SCRIPT" >/dev/null 2>&1 )
 assert_contains "$(cat "$DBT_CALL_LOG")" "build --target ci --select fct_a+ state:modified+ --defer --state prod_state --exclude-resource-type test" "git-diff + state:modified+ combined select"
+assert_contains "$(cat "$GITHUB_ENV_FILE4")" "CI_SELECT=fct_a+ state:modified+" "CI_SELECT exported for combined build"
+assert_contains "$(cat "$GITHUB_ENV_FILE4")" "CI_DEFER=--defer --state prod_state" "CI_DEFER exported for combined build"
 
 echo "scenario: HAS_STATE + fallback + no BUILD_SELECT → state:modified+ only"
 : > "$DBT_CALL_LOG"
@@ -81,6 +85,8 @@ GITHUB_ENV_FILE5="$SANDBOX5/github_env_5"; : > "$GITHUB_ENV_FILE5"
     GITHUB_ENV="$GITHUB_ENV_FILE5" DBT_ARTIFACTS_BUCKET="fake-bucket" \
     HAS_MODEL_CHANGES=true NEEDS_FALLBACK=true BUILD_SELECT="" bash "$SCRIPT" >/dev/null 2>&1 )
 assert_contains "$(cat "$DBT_CALL_LOG")" "build --target ci --select state:modified+ --defer --state prod_state --exclude-resource-type test" "state:modified+ fallback only"
+assert_contains "$(cat "$GITHUB_ENV_FILE5")" "CI_SELECT=state:modified+" "CI_SELECT exported for state:modified+ fallback"
+assert_contains "$(cat "$GITHUB_ENV_FILE5")" "CI_DEFER=--defer --state prod_state" "CI_DEFER exported for state:modified+ fallback"
 
 echo "scenario: no manifest (HAS_STATE false) → full build, no defer"
 : > "$DBT_CALL_LOG"
