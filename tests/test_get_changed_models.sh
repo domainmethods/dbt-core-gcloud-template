@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Tests for scripts/get_changed_models.sh change detection + DIFF_SELECT derivation.
+# Tests for scripts/get_changed_models.sh change detection + BUILD_SELECT/DIFF_SELECT/
+# NEEDS_FALLBACK derivation.
 #
 # Dependency-free: requires bash 4+, git, coreutils. No bats, no pip packages.
 # Builds a throwaway git repo per scenario so `git diff --name-only "$BASE_REF...HEAD"`
@@ -80,7 +81,7 @@ run_script() {
 cleanup() { [[ -n "${REPO:-}" && -d "$REPO" ]] && rm -rf "$REPO"; }
 
 scenario_1() {
-  echo "  scenario 1: no changed files -> HAS_MODEL_CHANGES=false, DIFF_SELECT empty"
+  echo "  scenario 1: no changed files -> HAS_MODEL_CHANGES=false, DIFF_SELECT/BUILD_SELECT empty, NEEDS_FALLBACK=false"
   make_repo
   # HEAD == BASE, so the diff is empty.
   run_script "$BASE"
@@ -88,18 +89,24 @@ scenario_1() {
   # Exact emptiness is only unambiguous in the env file (stdout uses a <none> display fallback).
   assert_contains "$RUN_ENV" "DIFF_SELECT=" "DIFF_SELECT key is exported"
   assert_not_contains "$RUN_ENV" "DIFF_SELECT=." "DIFF_SELECT is empty (no value after '=')"
+  assert_contains "$RUN_ENV" "BUILD_SELECT=" "BUILD_SELECT key is exported"
+  assert_not_contains "$RUN_ENV" "BUILD_SELECT=." "BUILD_SELECT is empty (no value after '=')"
   assert_not_contains "$RUN_ENV" "+" "no selector tokens are emitted for a no-change diff"
+  assert_contains "$RUN_OUT" "NEEDS_FALLBACK=false" "no changes reports NEEDS_FALLBACK=false"
   cleanup
 }
 
 scenario_2() {
-  echo "  scenario 2: one changed .sql model -> DIFF_SELECT=<name>+"
+  echo "  scenario 2: one changed .sql model -> BUILD_SELECT=DIFF_SELECT=<name>+, NEEDS_FALLBACK=false"
   make_repo
   commit_files "models/staging/stg_foo.sql"
   run_script "$BASE"
   assert_contains "$RUN_OUT" "HAS_MODEL_CHANGES=true" "a model change reports HAS_MODEL_CHANGES=true"
   assert_contains "$RUN_OUT" "DIFF_SELECT=stg_foo+" "stdout advertises the single selector"
   assert_contains "$RUN_ENV" "DIFF_SELECT=stg_foo+" "env exports exactly one 'name+' token"
+  assert_contains "$RUN_OUT" "BUILD_SELECT=stg_foo+" "stdout advertises BUILD_SELECT matching DIFF_SELECT"
+  assert_contains "$RUN_ENV" "BUILD_SELECT=stg_foo+" "env exports BUILD_SELECT matching DIFF_SELECT"
+  assert_contains "$RUN_OUT" "NEEDS_FALLBACK=false" "a scoped model change reports NEEDS_FALLBACK=false"
   cleanup
 }
 
@@ -111,19 +118,24 @@ scenario_3() {
   commit_files "models/marts/fct_b.sql" "models/staging/stg_a.sql"
   run_script "$BASE"
   assert_contains "$RUN_ENV" "DIFF_SELECT=fct_b+ stg_a+" "both models become space-separated 'name+' tokens"
+  assert_contains "$RUN_ENV" "BUILD_SELECT=fct_b+ stg_a+" "BUILD_SELECT matches DIFF_SELECT for multiple models"
   cleanup
 }
 
 scenario_4() {
-  echo "  scenario 4: non-model dbt changes -> HAS_MODEL_CHANGES=true, DIFF_SELECT empty"
+  echo "  scenario 4: non-model dbt changes -> HAS_MODEL_CHANGES=true, DIFF_SELECT/BUILD_SELECT empty, NEEDS_FALLBACK=true"
   # A macro change is dbt-relevant (build must run) but yields no model name,
-  # so DIFF_SELECT stays empty and the state:modified+ fallback governs.
+  # so DIFF_SELECT/BUILD_SELECT stay empty and NEEDS_FALLBACK signals the caller
+  # to fall back to state:modified+.
   make_repo
   commit_files "macros/my_macro.sql"
   run_script "$BASE"
   assert_contains "$RUN_OUT" "HAS_MODEL_CHANGES=true" "a macro change still flags model changes"
   assert_not_contains "$RUN_ENV" "DIFF_SELECT=." "a macro-only change exports an empty DIFF_SELECT"
   assert_not_contains "$RUN_ENV" "+" "a macro-only change emits no selector tokens"
+  assert_contains "$RUN_OUT" "BUILD_SELECT=" "BUILD_SELECT key is present for a macro-only change"
+  assert_not_contains "$RUN_ENV" "BUILD_SELECT=." "a macro-only change exports an empty BUILD_SELECT"
+  assert_contains "$RUN_OUT" "NEEDS_FALLBACK=true" "a macro-only change reports NEEDS_FALLBACK=true"
   cleanup
 
   # dbt_project.yml is the same class of change.
@@ -132,6 +144,75 @@ scenario_4() {
   run_script "$BASE"
   assert_contains "$RUN_OUT" "HAS_MODEL_CHANGES=true" "a dbt_project.yml change flags model changes"
   assert_not_contains "$RUN_ENV" "DIFF_SELECT=." "a dbt_project.yml-only change exports an empty DIFF_SELECT"
+  assert_contains "$RUN_OUT" "NEEDS_FALLBACK=true" "a dbt_project.yml-only change reports NEEDS_FALLBACK=true"
+  cleanup
+
+  # packages.yml is the same class of change.
+  make_repo
+  commit_files "packages.yml"
+  run_script "$BASE"
+  assert_contains "$RUN_OUT" "HAS_MODEL_CHANGES=true" "a packages.yml change flags model changes"
+  assert_contains "$RUN_OUT" "NEEDS_FALLBACK=true" "a packages.yml-only change reports NEEDS_FALLBACK=true"
+  cleanup
+}
+
+scenario_5() {
+  echo "  scenario 5: seed .csv changed -> BUILD_SELECT/DIFF_SELECT include seed+, NEEDS_FALLBACK=false"
+  make_repo
+  commit_files "seeds/my_seed.csv"
+  run_script "$BASE"
+  assert_contains "$RUN_OUT" "HAS_MODEL_CHANGES=true" "a seed change reports HAS_MODEL_CHANGES=true"
+  assert_contains "$RUN_OUT" "BUILD_SELECT=my_seed+" "stdout advertises the seed selector on BUILD_SELECT"
+  assert_contains "$RUN_OUT" "DIFF_SELECT=my_seed+" "stdout advertises the seed selector on DIFF_SELECT"
+  assert_contains "$RUN_ENV" "BUILD_SELECT=my_seed+" "env exports the seed 'name+' token on BUILD_SELECT"
+  assert_contains "$RUN_OUT" "NEEDS_FALLBACK=false" "a scoped seed change reports NEEDS_FALLBACK=false"
+  cleanup
+}
+
+scenario_6() {
+  echo "  scenario 6: snapshot .sql changed -> BUILD_SELECT/DIFF_SELECT include snap+, NEEDS_FALLBACK=false"
+  make_repo
+  commit_files "snapshots/snap_a.sql"
+  run_script "$BASE"
+  assert_contains "$RUN_OUT" "HAS_MODEL_CHANGES=true" "a snapshot change reports HAS_MODEL_CHANGES=true"
+  assert_contains "$RUN_OUT" "BUILD_SELECT=snap_a+" "stdout advertises the snapshot selector on BUILD_SELECT"
+  assert_contains "$RUN_OUT" "DIFF_SELECT=snap_a+" "stdout advertises the snapshot selector on DIFF_SELECT"
+  assert_contains "$RUN_ENV" "BUILD_SELECT=snap_a+" "env exports the snapshot 'name+' token on BUILD_SELECT"
+  assert_contains "$RUN_OUT" "NEEDS_FALLBACK=false" "a scoped snapshot change reports NEEDS_FALLBACK=false"
+  cleanup
+}
+
+scenario_7() {
+  echo "  scenario 7: models/*.yml-only (no sql/seed/snapshot) -> NEEDS_FALLBACK=true, BUILD_SELECT empty"
+  make_repo
+  commit_files "models/marts/schema.yml"
+  run_script "$BASE"
+  assert_contains "$RUN_OUT" "HAS_MODEL_CHANGES=true" "a models/*.yml change reports HAS_MODEL_CHANGES=true"
+  assert_not_contains "$RUN_ENV" "BUILD_SELECT=." "a models/*.yml-only change exports an empty BUILD_SELECT"
+  assert_contains "$RUN_OUT" "NEEDS_FALLBACK=true" "a models/*.yml-only change (no node) reports NEEDS_FALLBACK=true"
+  cleanup
+}
+
+scenario_8() {
+  echo "  scenario 8: macro + model together -> NEEDS_FALLBACK=true, BUILD_SELECT=<name>+"
+  make_repo
+  commit_files "macros/m.sql" "models/marts/fct_a.sql"
+  run_script "$BASE"
+  assert_contains "$RUN_OUT" "NEEDS_FALLBACK=true" "a macro+model change reports NEEDS_FALLBACK=true"
+  assert_contains "$RUN_OUT" "BUILD_SELECT=fct_a+" "the model is still scoped into BUILD_SELECT despite the macro change"
+  assert_contains "$RUN_OUT" "DIFF_SELECT=fct_a+" "the model is still scoped into DIFF_SELECT despite the macro change"
+  cleanup
+}
+
+scenario_9() {
+  echo "  scenario 9: docs-only (README) change -> HAS_MODEL_CHANGES=false, NEEDS_FALLBACK=false, BUILD_SELECT empty"
+  make_repo
+  commit_files "README.md"
+  run_script "$BASE"
+  assert_contains "$RUN_OUT" "HAS_MODEL_CHANGES=false" "a docs-only change reports HAS_MODEL_CHANGES=false"
+  assert_contains "$RUN_OUT" "NEEDS_FALLBACK=false" "a docs-only change reports NEEDS_FALLBACK=false"
+  assert_not_contains "$RUN_ENV" "BUILD_SELECT=." "a docs-only change exports an empty BUILD_SELECT"
+  assert_not_contains "$RUN_ENV" "DIFF_SELECT=." "a docs-only change exports an empty DIFF_SELECT"
   cleanup
 }
 
@@ -140,6 +221,11 @@ scenario_1
 scenario_2
 scenario_3
 scenario_4
+scenario_5
+scenario_6
+scenario_7
+scenario_8
+scenario_9
 
 echo ""
 echo "passed: $PASS_COUNT  failed: $FAIL_COUNT"
