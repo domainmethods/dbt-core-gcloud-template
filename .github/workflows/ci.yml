@@ -104,8 +104,13 @@ jobs:
         id: dbt_test
         if: ${{ steps.dbt_build.outcome == 'success' && env.HAS_MODEL_CHANGES != 'false' }}
         continue-on-error: true
+        # --indirect-selection cautious: under --defer, a data test spanning a
+        # freshly-built (selected) model and a deferred (stale-prod) model would
+        # reconcile fresh-vs-stale and fail on non-code drift. cautious runs a
+        # test only when every referenced model is selected, keeping those false
+        # errors out of the report (they still run in the full nightly/prod build).
         run: |
-          dbt test --target ci ${CI_SELECT:+--select "$CI_SELECT"} ${CI_DEFER}
+          dbt test --target ci --indirect-selection cautious ${CI_SELECT:+--select "$CI_SELECT"} ${CI_DEFER}
 
       - name: Source freshness (optional)
         if: ${{ steps.dbt_build.outcome == 'success' && env.RUN_FRESHNESS == 'true' }}

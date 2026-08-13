@@ -71,10 +71,10 @@ positive and how to keep them out of the signal.
 non-blocking** CI step. So a failing data test surfaces as its own (red) check without skipping the
 diff/comment steps (which gate on model-build success only).
 
-> **ACTION ITEM (open):** the non-blocking `dbt test` step must also pass
-> **`--indirect-selection cautious`**. Otherwise the class-4 cross-boundary tests still fill the
-> non-blocking test *report* with false errors and bury real ones. (PR #56 adds this flag to
-> `main`'s inline build; on this branch it belongs on the separate `dbt test` invocation.)
+> **Resolved:** the non-blocking `dbt test` step passes **`--indirect-selection cautious`**, so the
+> class-4 cross-boundary tests (fresh-vs-deferred) stay out of the report. PR #56 added this flag to
+> `main`'s inline build; here it lives on the separate `dbt test` step, and #56 was folded into this
+> PR rather than merged on its own.
 
 ## Docs-only PRs
 
