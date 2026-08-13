@@ -72,7 +72,15 @@ if [[ "${HAS_STATE}" == "true" ]]; then
 
   echo ""
   echo "Starting Slim CI build with defer..."
-  dbt build --target ci --select "state:modified+" --defer --state prod_state
+  # --indirect-selection=cautious: under --defer, unselected models are frozen to
+  # older prod tables. dbt's default eager selection would run any data test that
+  # touches a *selected* model even when the test also touches a *deferred* (stale)
+  # one, comparing a freshly built model against an older prod table — fresh-vs-stale
+  # drift that is not a code change and can fail unrelated PRs. cautious runs a test
+  # only when every model it references is selected; cross-boundary tests are skipped
+  # in PR CI and still run in the full prod build. Single-model schema tests and
+  # both-sides-selected tests are unaffected.
+  dbt build --target ci --select "state:modified+" --defer --state prod_state --indirect-selection cautious
 else
   echo "No production state available, running full build"
   echo "All models will be built from scratch"
