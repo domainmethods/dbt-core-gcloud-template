@@ -3,7 +3,7 @@
 A single reference for how the template's PR CI produces **data diffs** and **schema diffs**,
 why "no-op" PRs can show phantom differences or false test failures, and how the template's
 design mitigates each. Distilled from the multi-phase effort on this template (PRs #55, #56) and
-validated end-to-end against a real downstream consumer (`weightcare-pipeline-new`).
+validated end-to-end against a real downstream project.
 
 ## How the check is built
 
@@ -101,10 +101,3 @@ diff/comment steps (which gate on model-build success only).
   manifest is stale.
 - **Classes 2 & 3 are data-modeling fixes**, not CI features — the template can't fix a consumer's
   non-deterministic models; this doc is the guidance.
-
-## Cross-references
-
-- Design/plan: `docs/superpowers/specs/2026-08-12-template-build-selection-parity-design.md`,
-  `docs/superpowers/plans/2026-08-12-template-build-selection-parity.md`.
-- Downstream consolidation (weightcare): `docs/ci_slim_build_accuracy_learnings.md` (that repo's
-  PR #142), covering the same classes with issue-level history (#117, #128–#131, #138, #140).
