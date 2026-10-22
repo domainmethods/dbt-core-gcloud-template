@@ -854,8 +854,8 @@ Automatic upload on prod runs:
 
 Set up basic monitoring for failures across the stack using log‑based metrics and alerting policies.
 
-* Metrics: `cloud_run_job_errors`, `cloud_run_job_failures` (text match), `cloud_scheduler_job_errors`, `bigquery_job_errors`.
-* Policies: alert when count > 0 over 5 minutes; uses `gcloud beta/alpha monitoring policies`.
+* Metrics: `cloud_run_job_errors` (execution logs; audit logs excluded), `cloud_run_job_failures` (task-level text match, for dashboards), `cloud_scheduler_job_errors`, `bigquery_job_errors` (skips transients dbt retries past).
+* Policies: alert when count > 0 over 5 minutes; uses `gcloud beta/alpha monitoring policies`. The job failure policy uses the built-in `run.googleapis.com/job/completed_execution_count` (`result="failed"`), so it fires only when a whole execution fails after task retries.
 * Channels: optional but recommended via `infra/85-ensure-notification-channels.sh` (sets `NOTIFICATION_CHANNELS`).
 
 Usage
@@ -871,7 +871,7 @@ Usage
 Notes
 
 * Requires an up‑to‑date `gcloud` with Monitoring alpha/beta commands.
-* Safe to re‑run; existing metrics/policies are left in place.
+* Safe to re‑run: existing metrics and policies are updated in place to match the script. With `NOTIFICATION_CHANNELS` unset, a policy keeps the channels it already has.
 
 ## Operational Notes
 
