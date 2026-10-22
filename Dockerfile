@@ -12,10 +12,12 @@ COPY dbt_project.yml packages.yml requirements.txt ./
 COPY profiles/ ./profiles/
 COPY macros/ ./macros/
 COPY models/ ./models/
-# seeds/ and snapshots/ are optional — ensure dirs exist for COPY
-RUN mkdir -p seeds snapshots
+# seeds/, snapshots/ and tests/ are optional — ensure dirs exist for COPY
+RUN mkdir -p seeds snapshots tests
 COPY seeds/ ./seeds/
 COPY snapshots/ ./snapshots/
+# Singular data tests; without this, prod `dbt build` silently skips them
+COPY tests/ ./tests/
 COPY hooks/ ./hooks/
 COPY scripts/lib/ ./scripts/lib/
 

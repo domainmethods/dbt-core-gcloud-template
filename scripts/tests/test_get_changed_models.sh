@@ -6,14 +6,14 @@
 # Builds a throwaway git repo per scenario so `git diff --name-only "$BASE_REF...HEAD"`
 # is exercised for real, deterministically, without any network.
 #
-# Usage: bash tests/test_get_changed_models.sh
+# Usage: bash scripts/tests/test_get_changed_models.sh
 #
 # Note: `set -e` is deliberately NOT used. The harness inspects the script's
 # stdout and the $GITHUB_ENV it writes; aborting on a non-zero exit would defeat
 # the purpose.
 set -uo pipefail
 
-REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 SCRIPT="$REPO_ROOT/scripts/get_changed_models.sh"
 
 PASS_COUNT=0
