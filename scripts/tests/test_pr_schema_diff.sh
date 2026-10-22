@@ -4,13 +4,13 @@
 # Dependency-free: requires bash 4+, jq, coreutils. No bats, no pip packages.
 # Runs the real script against stubbed `bq` and `dbt` binaries on PATH.
 #
-# Usage: bash tests/test_pr_schema_diff.sh
+# Usage: bash scripts/tests/test_pr_schema_diff.sh
 #
 # Note: `set -e` is deliberately NOT used. The harness inspects non-zero exit
 # codes from the script under test; aborting on them would defeat the purpose.
 set -uo pipefail
 
-REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 SCRIPT="$REPO_ROOT/scripts/pr_schema_diff.sh"
 
 PASS_COUNT=0

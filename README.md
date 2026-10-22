@@ -456,7 +456,9 @@ Tip: 25/50/70/80/81/85/90/15 are optional and can be run any time after 10 (and 
 * `Dockerfile`, `entrypoint.sh` — Containerized dbt runner (supports optional hooks & docs)
 * `profiles/profiles.yml` — Env‑var driven dbt profiles for dev/ci/prod
 * `models/` — Example models/tests (staging → marts)
+* `tests/` — Singular data tests (SQL). Copied into the prod image, so they run in the nightly `dbt build`. To keep an expensive test out of prod, tag it (e.g. `tags: ['ci_only']`) and set `DBT_BUILD_ARGS="--exclude tag:ci_only"` on the Cloud Run Job.
 * `scripts/` — CI helpers (create/drop dataset, Slim CI, compare template)
+* `scripts/tests/` — Shell tests for the CI helpers (`make test-scripts`; no warehouse access needed)
 * `infra/` — One‑time GCP bootstrap (APIs, SAs, WIF/OIDC, datasets, Artifact Registry, Cloud Run Job, Scheduler)
 
   * Uses **Workload Identity Federation** for GitHub Actions (no long‑lived keys).
