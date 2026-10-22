@@ -15,6 +15,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Test shell scripts
+        run: |
+          bash tests/test_pr_schema_diff.sh
+          bash tests/test_pr_data_diff.sh
+          bash tests/test_get_changed_models.sh
+          bash tests/test_ci_build.sh
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -94,6 +100,18 @@ jobs:
         id: dbt_build
         run: bash scripts/ci_build.sh
 
+      - name: Run dbt tests (non-blocking; does not gate diffs)
+        id: dbt_test
+        if: ${{ steps.dbt_build.outcome == 'success' && env.HAS_MODEL_CHANGES != 'false' }}
+        continue-on-error: true
+        # --indirect-selection cautious: under --defer, a data test spanning a
+        # freshly-built (selected) model and a deferred (stale-prod) model would
+        # reconcile fresh-vs-stale and fail on non-code drift. cautious runs a
+        # test only when every referenced model is selected, keeping those false
+        # errors out of the report (they still run in the full nightly/prod build).
+        run: |
+          dbt test --target ci --indirect-selection cautious ${CI_SELECT:+--select "$CI_SELECT"} ${CI_DEFER}
+
       - name: Source freshness (optional)
         if: ${{ steps.dbt_build.outcome == 'success' && env.RUN_FRESHNESS == 'true' }}
         run: |
@@ -112,8 +130,16 @@ jobs:
         if: ${{ steps.dbt_build.outcome == 'success' }}
         run: bash scripts/pr_data_diff.sh
 
+      # continue-on-error keeps a schema-diff failure from failing the build, but
+      # it does not bound runtime, and GitHub applies no per-step timeout (the
+      # job-level 360-minute default would otherwise apply). The downstream
+      # publish steps gate on this step's outcome so a partial report is never
+      # posted as if it were complete.
       - name: Generate schema diffs for changed models
+        id: schema_diff
         if: ${{ steps.dbt_build.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 10
         run: bash scripts/pr_schema_diff.sh
 
       - name: Upload CI artifacts (docs + manifest + data diffs)
@@ -150,7 +176,7 @@ jobs:
           path: diff_reports/
 
       - name: Attach schema diffs to PR as artifact
-        if: ${{ steps.dbt_build.outcome == 'success' && hashFiles('schema_diff_reports/**') != '' }}
+        if: ${{ steps.schema_diff.outcome == 'success' && hashFiles('schema_diff_reports/**') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: schema-diff-pr-${{ github.event.number }}-${{ github.run_id }}
@@ -180,7 +206,7 @@ jobs:
             await github.rest.issues.createComment({ owner, repo, issue_number, body: fullBody });
 
       - name: Post schema summary comment on PR
-        if: ${{ steps.dbt_build.outcome == 'success' && hashFiles('schema_diff_reports/schema-summary.md') != '' && github.event.pull_request.head.repo.full_name == github.repository }}
+        if: ${{ steps.schema_diff.outcome == 'success' && hashFiles('schema_diff_reports/schema-summary.md') != '' && github.event.pull_request.head.repo.full_name == github.repository }}
         uses: actions/github-script@v7
         with:
           script: |

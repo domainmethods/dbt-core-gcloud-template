@@ -1,4 +1,4 @@
-.PHONY: init deps build test lint lint-fix docs compare clean freshness
+.PHONY: init deps build test test-scripts lint lint-fix docs compare clean freshness
 
 # One-time setup: load env vars, install deps, install pre-commit
 init:
@@ -19,6 +19,10 @@ run:
 
 test:
 	dbt test --target $${DBT_TARGET:-dev}
+
+# Shell script tests. No warehouse connection, no credentials, no cost.
+test-scripts:
+	bash tests/test_pr_schema_diff.sh
 
 lint:
 	pre-commit run --hook-stage manual --all-files

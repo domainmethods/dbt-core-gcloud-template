@@ -13,6 +13,12 @@ DEV_PROJECT=${DBT_GCP_PROJECT_CI:?set DBT_GCP_PROJECT_CI}
 DEV_DATASET=${DBT_BQ_DATASET:?set DBT_BQ_DATASET}
 PROD_PROJECT=${DBT_GCP_PROJECT_PROD:-}
 
+# Docs/config-only PRs change no models — skip the diff entirely (no gsutil, no dbt).
+if [[ "${HAS_MODEL_CHANGES:-true}" == "false" ]]; then
+  echo "No dbt model changes detected in this PR. No models to diff."
+  exit 0
+fi
+
 # Pull prod manifest if not already present (optional, CI workflow usually does this earlier)
 echo "=== Data Diff State Detection ==="
 echo "Checking for production manifest for model selection..."
@@ -33,20 +39,18 @@ fi
 
 echo ""
 echo "=== Model Selection ==="
-if [[ -f prod_state/manifest.json ]]; then
+if [[ -n "${DIFF_SELECT:-}" ]]; then
+  echo "Using git-diff scope: ${DIFF_SELECT}"
+  # DIFF_SELECT is intentionally unquoted so multiple 'name+' tokens expand as separate args.
+  mapfile -t MODELS < <(dbt ls --select ${DIFF_SELECT} --resource-type model --output name --quiet 2>/dev/null || true)
+elif [[ -f prod_state/manifest.json ]]; then
   echo "Using state comparison to find changed models..."
   mapfile -t MODELS < <(dbt ls --select "state:modified+" --state prod_state --resource-type model --output name --quiet 2>/dev/null || true)
-  echo "Models detected as state:modified+:"
-  if (( ${#MODELS[@]} == 0 )); then
-    echo "  (none - no models changed)"
-  else
-    printf "  - %s\n" "${MODELS[@]}"
-  fi
 else
-  echo "No production manifest available, selecting all models..."
+  echo "No git scope and no production manifest; selecting all models..."
   mapfile -t MODELS < <(dbt ls --resource-type model --output name --quiet 2>/dev/null || true)
-  echo "All models selected (${#MODELS[@]} total)"
 fi
+echo "Selected ${#MODELS[@]} model(s)."
 
 if (( ${#MODELS[@]} == 0 )); then
   echo "No models to diff."
