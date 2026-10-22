@@ -26,6 +26,7 @@ test-scripts:
 	bash scripts/tests/test_pr_data_diff.sh
 	bash scripts/tests/test_get_changed_models.sh
 	bash scripts/tests/test_ci_build.sh
+	bash scripts/tests/test_monitoring.sh
 
 lint:
 	pre-commit run --hook-stage manual --all-files
