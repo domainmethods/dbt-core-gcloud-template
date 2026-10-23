@@ -4,7 +4,7 @@ dbt_gcloud:
     dev:
       type: bigquery
       method: "{{ env_var('DBT_BQ_METHOD', 'oauth') }}"
-      project: "{{ env_var('DBT_GCP_PROJECT_DEV') }}"
+      project: "{{ env_var('DBT_GCP_PROJECT_DEV', 'DEV_NOT_CONFIGURED') }}"
       dataset: "{{ env_var('DBT_BQ_DATASET', 'analytics_' ~ env_var('DBT_USER', 'local')) }}"
       location: "{{ env_var('DBT_BQ_LOCATION', 'US') }}"
       threads: 4
@@ -19,8 +19,8 @@ dbt_gcloud:
       method: oauth
       # Uses Application Default Credentials from GOOGLE_APPLICATION_CREDENTIALS
       # (minted by google-github-actions/auth in CI)
-      project: "{{ env_var('DBT_GCP_PROJECT_CI') }}"
-      dataset: "{{ env_var('DBT_BQ_DATASET') }}"
+      project: "{{ env_var('DBT_GCP_PROJECT_CI', 'CI_NOT_CONFIGURED') }}"
+      dataset: "{{ env_var('DBT_BQ_DATASET', 'CI_DATASET_NOT_CONFIGURED') }}"
       location: "{{ env_var('DBT_BQ_LOCATION', 'US') }}"
       threads: 4
       priority: "{{ env_var('DBT_BQ_PRIORITY', 'interactive') }}"
@@ -32,7 +32,7 @@ dbt_gcloud:
     prod:
       type: bigquery
       method: oauth
-      project: "{{ env_var('DBT_GCP_PROJECT_PROD') }}"
+      project: "{{ env_var('DBT_GCP_PROJECT_PROD', 'PROD_NOT_CONFIGURED') }}"
       dataset: "{{ env_var('DBT_BQ_DATASET_PROD', 'analytics') }}"
       location: "{{ env_var('DBT_BQ_LOCATION', 'US') }}"
       threads: 8
