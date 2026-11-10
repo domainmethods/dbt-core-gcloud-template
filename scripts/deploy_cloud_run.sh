@@ -21,13 +21,13 @@ INVOKER_SA=${INVOKER_SA:?required}
 if ! gcloud run jobs describe "$JOB" --region "$REGION" >/dev/null 2>&1; then
   gcloud run jobs create "$JOB" \
     --image "$IMAGE_URI" \
-    --set-env-vars=DBT_TARGET=prod,DBT_GCP_PROJECT_PROD=$PROJECT,DBT_BQ_DATASET_PROD=analytics,DBT_BQ_LOCATION=US \
+    --set-env-vars=DBT_TARGET=prod,CI=true,DBT_GCP_PROJECT_PROD=$PROJECT,DBT_BQ_DATASET_PROD=analytics,DBT_BQ_LOCATION=US \
     --region "$REGION" --memory=2Gi --cpu=1 --max-retries=0
 fi
 
 gcloud run jobs update "$JOB" \
   --image "$IMAGE_URI" \
-  --set-env-vars=DBT_TARGET=prod,DBT_GCP_PROJECT_PROD=$PROJECT,DBT_BQ_DATASET_PROD=analytics,DBT_BQ_LOCATION=US \
+  --set-env-vars=DBT_TARGET=prod,CI=true,DBT_GCP_PROJECT_PROD=$PROJECT,DBT_BQ_DATASET_PROD=analytics,DBT_BQ_LOCATION=US \
   --region "$REGION"
 
 EXEC_URI="https://run.googleapis.com/v2/projects/${PROJECT}/locations/${REGION}/jobs/${JOB}:run"

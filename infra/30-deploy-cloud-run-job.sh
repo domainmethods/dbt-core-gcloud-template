@@ -93,6 +93,8 @@ ensure_image
 
 env_kvs=(
   "DBT_TARGET=prod"
+  # guard_dev_environment() only lets --target prod through when CI=true.
+  "CI=true"
   "DBT_GCP_PROJECT_PROD=${PROJECT_ID}"
   "DBT_BQ_DATASET_PROD=${PROD_DATASET}"
   "DBT_BQ_LOCATION=${BQ_LOCATION}"
