@@ -8,7 +8,7 @@
 # `set -e` is deliberately NOT used so assertions can accumulate.
 set -uo pipefail
 
-REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 SCRIPT="$REPO_ROOT/scripts/ci_build.sh"
 PASS_COUNT=0; FAIL_COUNT=0
 pass(){ echo "    ok   - $1"; PASS_COUNT=$((PASS_COUNT+1)); }
