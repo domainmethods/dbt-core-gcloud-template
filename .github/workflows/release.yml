@@ -67,7 +67,7 @@ jobs:
             --image "$IMAGE_URI"
             --service-account "${{ secrets.GCP_PROD_SA_EMAIL }}"
             --task-timeout=3600s
-            --set-env-vars "DBT_TARGET=prod,DBT_GCP_PROJECT_PROD=${{ secrets.GCP_PROJECT_PROD }},DBT_BQ_DATASET_PROD=${{ secrets.PROD_DATASET }},DBT_BQ_LOCATION=${{ secrets.BQ_LOCATION }},DBT_ARTIFACTS_BUCKET=${{ secrets.DBT_ARTIFACTS_BUCKET }},DBT_DOCS_BUCKET=${{ secrets.DBT_DOCS_BUCKET }},GENERATE_DOCS=true,DBT_PROFILES_DIR=/app/profiles"
+            --set-env-vars "DBT_TARGET=prod,CI=true,DBT_GCP_PROJECT_PROD=${{ secrets.GCP_PROJECT_PROD }},DBT_BQ_DATASET_PROD=${{ secrets.PROD_DATASET }},DBT_BQ_LOCATION=${{ secrets.BQ_LOCATION }},DBT_ARTIFACTS_BUCKET=${{ secrets.DBT_ARTIFACTS_BUCKET }},DBT_DOCS_BUCKET=${{ secrets.DBT_DOCS_BUCKET }},GENERATE_DOCS=true,DBT_PROFILES_DIR=/app/profiles"
             --region "${{ env.REGION }}"
           )
           # To inject Secret Manager secrets at runtime, add to COMMON_ARGS:

@@ -7,6 +7,9 @@
 #   make lint                                           # shortcut via Makefile
 #
 # yamllint runs on every commit (stages: [pre-commit, manual]).
+default_language_version:
+  python: python3
+
 repos:
   - repo: https://github.com/sqlfluff/sqlfluff
     rev: 3.4.2
