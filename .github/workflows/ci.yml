@@ -21,6 +21,7 @@ jobs:
           bash scripts/tests/test_pr_data_diff.sh
           bash scripts/tests/test_get_changed_models.sh
           bash scripts/tests/test_ci_build.sh
+          bash scripts/tests/test_monitoring.sh
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
