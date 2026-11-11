@@ -40,27 +40,30 @@ echo "DBT_ARTIFACTS_BUCKET: ${DBT_ARTIFACTS_BUCKET:-<unset>}"
 echo "Checking for production manifest at: gs://${DBT_ARTIFACTS_BUCKET:-<unset>}/prod/manifest.json"
 
 if [[ -n "${DBT_ARTIFACTS_BUCKET:-}" ]]; then
-  echo "Checking for production manifest..."
-  for attempt in 1 2 3; do
-    if gsutil ls "gs://${DBT_ARTIFACTS_BUCKET}/prod/manifest.json" >/dev/null 2>&1; then
-      gsutil cp "gs://${DBT_ARTIFACTS_BUCKET}/prod/manifest.json" prod_state/manifest.json && break
+  # Only a missing manifest falls back to a full build. A lookup error, a failed
+  # download or a corrupt manifest fails the job instead of hiding behind green (#74).
+  manifest_lookup=0
+  bash "$(dirname "$0")/lookup_prod_manifest.sh" "gs://${DBT_ARTIFACTS_BUCKET}/prod/manifest.json" \
+    || manifest_lookup=$?
+  if [[ ${manifest_lookup} -eq 1 ]]; then
+    echo "✗ Could not check for the production manifest; failing rather than building without --defer"
+    exit 1
+  fi
+  if [[ ${manifest_lookup} -eq 0 ]]; then
+    echo "Production manifest found, downloading..."
+    if ! gsutil cp "gs://${DBT_ARTIFACTS_BUCKET}/prod/manifest.json" prod_state/manifest.json; then
+      echo "✗ Production manifest exists but could not be downloaded"
+      exit 1
     fi
-    if [[ $attempt -lt 3 ]]; then
-      echo "Attempt $attempt failed, retrying in $((2 ** attempt))s..."
-      sleep $((2 ** attempt))
-    fi
-  done
-  if [[ -f prod_state/manifest.json ]]; then
     # Validate JSON structure (not just file size)
     if python3 -c "import json; json.load(open('prod_state/manifest.json'))" 2>/dev/null; then
       HAS_STATE="true"
       echo "Valid production manifest downloaded; Slim CI will use state comparison and defer"
     else
-      echo "Downloaded manifest is not valid JSON, treating as unavailable"
+      echo "✗ Downloaded manifest is not valid JSON; failing rather than building without --defer"
       rm -f prod_state/manifest.json
+      exit 1
     fi
-  else
-    echo "Manifest download failed after 3 attempts"
   fi
 else
   echo "DBT_ARTIFACTS_BUCKET not set, skipping production manifest download"
