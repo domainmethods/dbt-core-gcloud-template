@@ -50,5 +50,15 @@ echo "scenario 3: no DIFF_SELECT, manifest present → state:modified+"
 WITH_MANIFEST=1 run_case 'HAS_MODEL_CHANGES=true'
 assert_contains "$(cat "$DBT_CALL_LOG")" "state:modified+" "uses state comparison when scope absent"
 
+echo "scenario 4: manifest lookup fails (auth error) → exits non-zero, no dbt ls (#74)"
+make_sandbox
+printf '#!/usr/bin/env bash\necho "AccessDeniedException: 403" >&2\nexit 1\n' > "$SANDBOX/bin/gsutil"
+RUN_OUT=$(cd "$SANDBOX" && env -i PATH="$SANDBOX/bin:/usr/bin:/bin" \
+  DBT_CALL_LOG="$DBT_CALL_LOG" ARTIFACT_DIR="$SANDBOX/diff_reports" \
+  DBT_GCP_PROJECT_CI=ciproj DBT_BQ_DATASET=ci_ds DBT_ARTIFACTS_BUCKET=fake-bucket \
+  PROD_MANIFEST_RETRY_DELAY=0 HAS_MODEL_CHANGES=true bash "$SCRIPT" 2>&1); RC=$?
+[[ $RC -ne 0 ]] && pass "exits non-zero on lookup error" || fail "exits non-zero on lookup error (exit $RC)"
+assert_not_contains "$(cat "$DBT_CALL_LOG" 2>/dev/null)" "ls" "never selects models after a lookup error"
+
 echo "results: passed: $PASS_COUNT, failed: $FAIL_COUNT"
 [[ $FAIL_COUNT -eq 0 ]]
