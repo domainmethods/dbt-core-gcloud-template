@@ -5,7 +5,7 @@
 # while a package in packages.yml is not installed. So a fresh clone, or any
 # packages.yml change, failed every push with UninstalledPackagesFoundError
 # until someone ran `dbt deps` by hand. This runs `dbt deps` first when
-# dbt_packages/ is missing or older than packages.yml (or package-lock.yml),
+# dbt_packages/.deps-ok is missing or older than packages.yml (or package-lock.yml),
 # then hands over to sqlfluff. dbt and sqlfluff come from the hook's own env.
 #
 # Usage (from .pre-commit-config.yaml): sqlfluff_hook.sh lint|fix [files...]

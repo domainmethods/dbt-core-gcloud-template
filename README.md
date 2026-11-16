@@ -892,6 +892,8 @@ Automatic upload on prod runs:
 
 Packages are the easiest way to pay for work nobody uses. The template ships only `dbt_utils`, but most projects add connector or analytics packages. `dbt_project.yml` has commented examples for both points below.
 
+**Commit `package-lock.yml`.** `dbt deps` writes it with the exact version (and hash) it installed. Committed, it keeps your laptop, CI and the nightly job on the same package versions even when `packages.yml` uses a range. After changing `packages.yml`, run `dbt deps` and commit both files. CI treats a `package-lock.yml` change like a macro change and rebuilds the models that use the changed package macros (`state:modified+`).
+
 **Disable package models nothing reads (#67).** A package builds every model it ships, nightly and in every CI run. Downstream, turning off unread models removed about 48 models from the build, and six of them alone billed hundreds of GiB a week across prod and CI. To find safe candidates:
 
 1. In `target/manifest.json`, use `child_map` to keep only package models with no descendant in your own project.

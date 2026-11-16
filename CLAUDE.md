@@ -58,7 +58,9 @@ UTC `TIMESTAMP`s until the mart layer, converted once there.
 - No `DATETIME(TIMESTAMP(x), tz)` or `DATETIME(CAST(x AS TIMESTAMP), tz)` anywhere unless the `DATETIME(` line or the one above has `-- tz-ok: <reason>`. When `x` is already a local `DATETIME`, it is read as UTC and shifted again; dbt, sqlfluff and tests all accept it. Check the input's type, not the syntax.
 - Configure with `TZ_LINT_ZONES` / `TZ_LINT_LAYERS`. Converted columns get a suffix naming the zone (e.g. `_local`, `_ny`) so readers can tell them from UTC.
 SQLFluff config is in `.sqlfluff` — max line length 120, bigquery dialect, dbt templater.
-The hooks go through `scripts/sqlfluff_hook.sh`, which runs `dbt deps` first when `dbt_packages/` is missing or older than `packages.yml` (the dbt templater can't compile without it).
+The hooks go through `scripts/sqlfluff_hook.sh`, which runs `dbt deps` first when `dbt_packages/.deps-ok` is missing or older than `packages.yml` / `package-lock.yml` (the dbt templater can't compile without packages). The marker is written only after `dbt deps` succeeds, so a failed install is retried on the next push.
+
+`package-lock.yml` is committed: after changing `packages.yml`, run `dbt deps` and commit both.
 
 ## Architecture
 
@@ -71,7 +73,7 @@ The hooks go through `scripts/sqlfluff_hook.sh`, which runs `dbt deps` first whe
 PR triggers: lint job (SQLFluff + yamllint via pre-commit) → `bigquery-ci` job that:
 1. Creates ephemeral dataset `ci_pr_<number>_<run_id>`
 2. Downloads prod manifest from GCS for Slim CI (`state:modified+` with `--defer`)
-3. Runs `dbt build` against only modified models
+3. Runs `dbt build` against only modified models (full build when `requirements.txt` or `profiles/` changes, since `state:modified` can't see a dbt/adapter bump)
 4. Generates data diffs (`scripts/pr_data_diff.sh`) and schema diffs (`scripts/pr_schema_diff.sh`)
 5. Posts diff summaries as PR comments
 6. Cleans up ephemeral dataset
