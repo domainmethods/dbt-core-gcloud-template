@@ -30,8 +30,13 @@ RUN_FRESHNESS_FLAG="${RUN_FRESHNESS:-true}"
 
 # Ensure required CLIs are present
 command -v gcloud >/dev/null || { echo "gcloud not found"; exit 1; }
+# Cloud Build when docker is missing or its daemon isn't running (the usual macOS
+# case without Docker Desktop), instead of failing in `docker build` (#28).
 HAVE_DOCKER=1
 if ! command -v docker >/dev/null 2>&1; then
+  HAVE_DOCKER=0
+elif ! docker info >/dev/null 2>&1; then
+  info "docker is installed but its daemon isn't running; using Cloud Build"
   HAVE_DOCKER=0
 fi
 

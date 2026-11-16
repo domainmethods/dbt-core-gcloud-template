@@ -55,6 +55,8 @@ secrets=(
   # Deployment coordinates for workflows
   [GCP_REGION]="$REGION"
   [GCP_SCHED_REGION]="${SCHED_REGION:-$REGION}"
+  # Nightly cron for release.yml; empty keeps its 06:00 UTC default (#64)
+  [SCHED_CRON]="${SCHED_CRON:-}"
   [AR_REPO]="$AR_REPO"
   [IMAGE_NAME]="$IMAGE_NAME"
   # dbt runtime envs
