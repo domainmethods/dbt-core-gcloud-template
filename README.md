@@ -455,7 +455,7 @@ Optional helpers (as needed):
 * [infra/80-deploy-docs-viewer.sh](#docs-viewer-cloud-run-iam-only) — Deploy private Cloud Run docs viewer service (reads index.html from GCS).
 * [infra/81-grant-docs-viewer-access.sh](#docs-viewer-cloud-run-iam-only) — Grant run.invoker to users/groups for the docs viewer.
 * [infra/85-ensure-notification-channels.sh](#monitoring) — Create/reuse Monitoring email channels; writes NOTIFICATION_CHANNELS.
-* [infra/90-monitoring.sh](#monitoring) — Ensure alerting policies for Run Job, Scheduler, and BigQuery errors.
+* [infra/90-monitoring.sh](#monitoring) — Ensure alerting policies for Run Job, Scheduler, and BigQuery errors, and for a nightly run that never happens.
 * [infra/15-artifacts-lifecycle.sh](#docs--artifacts) — Set GCS lifecycle on artifacts/docs bucket (e.g., delete objects >30 days).
 * [infra/check-operator-iam.sh](#operator-iam-to-run-infra-scripts) — Check current operator’s project roles; helpful before running bootstrap.
 
@@ -892,8 +892,10 @@ Automatic upload on prod runs:
 
 Set up basic monitoring for failures across the stack using log‑based metrics and alerting policies.
 
-* Metrics: `cloud_run_job_errors` (execution logs; audit logs excluded), `cloud_run_job_failures` (task-level text match, for dashboards), `cloud_scheduler_job_errors`, `bigquery_job_errors` (skips transients dbt retries past).
-* Policies: alert when count > 0 over 5 minutes; uses `gcloud beta/alpha monitoring policies`. The job failure policy uses the built-in `run.googleapis.com/job/completed_execution_count` (`result="failed"`), so it fires only when a whole execution fails after task retries.
+* Metrics: `cloud_run_job_errors` (execution logs; audit logs excluded), `cloud_run_job_failures` (task-level text match, for dashboards), `cloud_scheduler_job_errors`, `bigquery_job_errors` (skips transients dbt retries past), `cloud_run_job_dbt_summary_heartbeat` (one per run that logged a dbt summary with results).
+* Policies: alert when count > 0 over 5 minutes; uses `gcloud beta/alpha monitoring policies`. The job failure policy uses the built-in `run.googleapis.com/job/completed_execution_count` (`result="failed"`), so it fires only when a whole execution fails after task retries. The missing-run policy fires when no heartbeat arrives for `MISSING_RUN_DURATION` (`3600s` to `88200s`, a multiple of 60; default and maximum `88200s`, 24h30m), so a paused scheduler or a job that never starts still pages. Lower it for jobs that run more than once a day.
+* **The missing-run alert assumes the job runs at least once a day.** The API caps the wait at 24h30m, so a schedule with longer gaps (e.g. a weekday-only `SCHED_CRON`) pages on every gap. For such schedules set `MISSING_RUN_ALERT=false` in `infra/.env`. Turning it off does not delete a policy created earlier; the script warns and prints the delete command.
+* The heartbeat is the run summary `entrypoint.sh` prints. Today it is printed only when `dbt build` succeeds, so a failing build is not a heartbeat: the failure alert pages, and if builds keep failing for `MISSING_RUN_DURATION` the missing-run alert opens too. #77 makes `entrypoint.sh` print the summary on failure as well; this alert is meant to land with or after it.
 * Channels: optional but recommended via `infra/85-ensure-notification-channels.sh` (sets `NOTIFICATION_CHANNELS`).
 
 Usage
@@ -911,6 +913,7 @@ Notes
 * Requires an up‑to‑date `gcloud` with Monitoring alpha/beta commands.
 * Safe to re‑run: existing metrics and policies are updated in place to match the script, and a policy that already matches is left alone (`Policy unchanged`), so a re-run sends no update.
 * The script owns each policy's name, combiner, conditions and, where it sets one, its runbook (`documentation`). Everything else is read from the live policy and kept: enabled/disabled, severity, user labels, alert strategy (auto-close, notification rate limits) and documentation you wrote in the console on a policy the script gives no runbook. With `NOTIFICATION_CHANNELS` unset, a policy also keeps the channels it already has; set it and the script replaces them. Edits in the console to the script-owned fields are reverted on the next run.
+* Creating or updating the missing-run policy opens one short incident a few minutes after the next run's summary. It closes on its own. A re-run that changes nothing sends no update, so it does not open one.
 
 ## Operational Notes
 
