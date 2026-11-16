@@ -77,6 +77,7 @@ assert_contains "$CALLS" "secrets create db-pass --replication-policy=automatic 
 assert_eq "$(grep -c "add-iam-policy-binding .* --member=$SA_MEMBER --role=roles/secretmanager.secretAccessor" <<<"$CALLS")" "2" "grants accessor on each secret"
 assert_not_contains "$CALLS" "projects add-iam-policy-binding" "no project-wide grant"
 assert_contains "$RUN_OUT" "gcloud secrets versions add api-key --data-file=-" "says how to add a value"
+assert_contains "$RUN_OUT" "read -rs VALUE" "reads the value without echo or shell history"
 assert_not_contains "$CALLS" "versions add" "never adds a value itself"
 
 echo "scenario 4: re-run with secrets, grants and values in place changes nothing"

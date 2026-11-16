@@ -55,7 +55,8 @@ while IFS= read -r name; do
   fi
   if [[ -z "$versions" ]]; then
     warn "Secret $name has no value yet. The job will fail to start until it has one:"
-    warn "  printf '%s' \"\$VALUE\" | gcloud secrets versions add $name --data-file=- --project $PROJECT_ID"
+    warn "  read -rs VALUE   # paste it; not echoed, not in shell history"
+    warn "  printf '%s' \"\$VALUE\" | gcloud secrets versions add $name --data-file=- --project $PROJECT_ID; unset VALUE"
   fi
 done <<<"$NAMES"
 
