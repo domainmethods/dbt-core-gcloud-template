@@ -660,12 +660,14 @@ Notes:
   ```sql
   SELECT destination_table.dataset_id AS dataset,
          MAX(EXTRACT(TIME FROM end_time)) AS latest_write_utc
-  FROM `region-us`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
+  FROM `region-REGION`.INFORMATION_SCHEMA.JOBS_BY_PROJECT  -- your BQ_LOCATION, e.g. region-us, region-eu
   WHERE creation_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
     AND state = 'DONE' AND error_result IS NULL
     AND destination_table.dataset_id IN ('your_source_dataset_1', 'your_source_dataset_2')
   GROUP BY dataset
   ```
+
+  `MAX(EXTRACT(TIME …))` assumes loads finish before midnight UTC: a load that ends at 00:30 reads as earlier than one at 23:00. If yours cross midnight, look at the `end_time` values directly.
 
   Source freshness is measured at run time. After moving the schedule, re-check the `warn_after` / `error_after` bands.
 
