@@ -20,6 +20,13 @@ done
 if grep -q "createComment" "$WORKFLOW"; then
   echo "    FAIL - ci.yml still calls createComment directly"; WF_FAIL=1
 fi
+# Two close pushes must not both find no comment and both create one: runs for a
+# PR queue behind each other (not cancelled -- that could orphan the BigQuery dataset).
+if ! grep -q "^concurrency:" "$WORKFLOW" \
+  || ! grep -q "group:.*github.event.pull_request.number || github.ref" "$WORKFLOW" \
+  || ! grep -q "cancel-in-progress: false" "$WORKFLOW"; then
+  echo "    FAIL - ci.yml lacks a per-PR concurrency group with cancel-in-progress: false"; WF_FAIL=1
+fi
 
 node - "$REPO_ROOT/scripts/lib/upsert_pr_comment.js" <<'JS'
 const upsert = require(process.argv[2]);

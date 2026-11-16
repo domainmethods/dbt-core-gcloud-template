@@ -5,6 +5,12 @@ on:
     branches: [ main ]
     paths-ignore: [ "README.md" ]
 
+# One run per PR at a time, so two close pushes can't both create a diff comment (#41).
+# Queue rather than cancel: cancelling mid-run could orphan the ephemeral BigQuery dataset.
+concurrency:
+  group: ci-pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
 env:
   DBT_BQ_LOCATION: US
   DBT_TARGET: ci
