@@ -60,12 +60,15 @@ fi
 # A model missing from the prod manifest is new, even if a leftover prod table shares
 # its name; the macro's INFORMATION_SCHEMA check alone would diff it against that
 # table (#12). With no readable manifest, the macro's table check decides.
+# Names match `dbt ls --output name`, which prints a versioned model as "<name>.v<version>".
 PROD_MODEL_NAMES=""
 if [[ -f prod_state/manifest.json ]]; then
   PROD_MODEL_NAMES="${ARTIFACT_DIR}/.prod_model_names"
   if ! python3 -c 'import json, sys
 nodes = json.load(open(sys.argv[1])).get("nodes", {})
-print("\n".join(sorted({n["name"] for n in nodes.values() if n.get("resource_type") == "model"})))' \
+def ls_name(n):
+    return n["name"] if n.get("version") is None else n["name"] + ".v" + str(n["version"])
+print("\n".join(sorted({ls_name(n) for n in nodes.values() if n.get("resource_type") == "model"})))' \
       prod_state/manifest.json > "$PROD_MODEL_NAMES" 2>/dev/null; then
     echo "⚠ Could not read model names from prod_state/manifest.json; using the prod table check"
     PROD_MODEL_NAMES=""

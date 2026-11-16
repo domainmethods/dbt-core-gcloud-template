@@ -19,7 +19,7 @@ make_sandbox() {
 #!/usr/bin/env bash
 echo "dbt $*" >> "$DBT_CALL_LOG"
 case "$1" in
-  ls) printf '%s\n' model_a model_b ;;
+  ls) printf '%s\n' "${STUB_LS:-model_a,model_b}" | tr , '\n' ;;  # STUB_LS: comma-separated names
   run-operation) echo "SUMMARY|table=model_a|dev=1|prod=1|dev_not_in_prod=0|prod_not_in_dev=0" ;;
   *) : ;;
 esac
@@ -70,6 +70,16 @@ assert_contains "$RUN_OUT" "Could not read model names" "warns that the manifest
 echo "scenario 6: no prod manifest keeps the table check (#12)"
 run_case 'HAS_MODEL_CHANGES=true'
 assert_not_contains "$(cat "$DBT_CALL_LOG")" "new_model: true" "no model forced new"
+
+# dbt ls --output name prints a versioned model's search_name ("<name>.v<version>"),
+# so the manifest side must be built the same way or every versioned model is "new".
+VERSIONED_MANIFEST='{"nodes": {"model.proj.dim_v": {"name": "dim_v", "resource_type": "model", "version": 2}, "model.proj.model_a": {"name": "model_a", "resource_type": "model", "version": null}}}'
+
+echo "scenario 7: a deployed versioned model is compared as usual, an undeployed version is new"
+WITH_MANIFEST=1 MANIFEST_JSON="$VERSIONED_MANIFEST" run_case 'HAS_MODEL_CHANGES=true DIFF_SELECT=dim_v+ STUB_LS=dim_v.v2,dim_v.v3,model_a'
+assert_not_contains "$(diff_call dim_v.v2)" "new_model: true" "dim_v.v2 (in manifest) is compared as usual"
+assert_contains "$(diff_call dim_v.v3)" "new_model: true" "dim_v.v3 (not in manifest) is passed as new"
+assert_not_contains "$(diff_call model_a)" "new_model: true" "unversioned model_a (in manifest) is compared as usual"
 
 echo "results: passed: $PASS_COUNT, failed: $FAIL_COUNT"
 [[ $FAIL_COUNT -eq 0 ]]
