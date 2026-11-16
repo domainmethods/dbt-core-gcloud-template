@@ -2,8 +2,8 @@ name: release
 
 on:
   push:
-    branches: [ main ]
-    paths-ignore: [ "README.md" ]
+    branches: [main]
+    paths-ignore: ["README.md"]
 
 env:
   REGION: ${{ secrets.GCP_REGION }}

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Detects which dbt model/seed/snapshot files changed in this PR vs origin/main.
+# Detects which dbt files (models, seeds, snapshots, macros, tests, analyses, config)
+# changed in this PR vs origin/main.
 # Outputs (to $GITHUB_ENV/$GITHUB_OUTPUT if available, else stdout):
 #   HAS_MODEL_CHANGES=true|false
 #   CHANGED_MODELS=<space-separated changed node names (models/seeds/snapshots)>
@@ -40,10 +41,11 @@ while IFS= read -r file; do
     snapshots/*.sql)
       HAS_MODEL_CHANGES=true
       CHANGED_NODES="${CHANGED_NODES} $(basename "$file" .sql)" ;;
-    models/*.yml|models/*.yaml)
+    models/*.yml|models/*.yaml|seeds/*.yml|seeds/*.yaml|snapshots/*.yml|snapshots/*.yaml)
       HAS_MODEL_CHANGES=true
       YAML_CHANGED=true ;;
-    macros/*.sql|dbt_project.yml|packages.yml)
+    # Singular/generic tests and analyses can't be scoped by filename either.
+    macros/*.sql|tests/*|analyses/*|dbt_project.yml|packages.yml)
       HAS_MODEL_CHANGES=true
       MACRO_OR_CONFIG=true ;;
   esac
@@ -60,7 +62,7 @@ done
 BUILD_SELECT=$(echo "$BUILD_SELECT" | xargs)
 DIFF_SELECT="$BUILD_SELECT"
 
-# Fallback needed when a change can't be scoped by filename: macros/config affect any model;
+# Fallback needed when a change can't be scoped by filename: macros/config/tests/analyses affect any model;
 # a yaml-only change (no node) can alter tests/configs on any model.
 NEEDS_FALLBACK=false
 if [[ "$MACRO_OR_CONFIG" == "true" ]]; then NEEDS_FALLBACK=true; fi

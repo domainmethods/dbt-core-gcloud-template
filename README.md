@@ -162,6 +162,16 @@ gcloud auth application-default login
 
 > **Why both?** `gcloud auth login` authenticates the gcloud CLI tools (bq, gsutil). `gcloud auth application-default login` creates Application Default Credentials (ADC) that Python libraries like dbt-bigquery use.
 
+> **Only if a source is a Google Sheet (or other Drive file) behind a BigQuery external table:** reading it needs a Drive scope, which the plain logins above don't grant. It's off by default on purpose: most projects never need Drive access. dbt-bigquery already requests the Drive scope (its default `scopes` include `https://www.googleapis.com/auth/drive`), so nothing changes in `profiles/profiles.yml`. What's missing is a token that carries it:
+>
+> ```bash
+> gcloud auth login --enable-gdrive-access   # bq CLI
+> gcloud auth application-default login \
+>   --scopes=https://www.googleapis.com/auth/bigquery,https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/drive.readonly   # dbt
+> ```
+>
+> For CI and prod, share each Sheet (Viewer) with the CI and prod service account emails. Their tokens are not user-scoped, so there's no login step.
+
 #### Step 4: Load Environment
 
 ```bash
@@ -393,6 +403,10 @@ DBT_DOCS_BUCKET=my-company-dbt-docs-$(date +%s)
 2. Verify project access: `gcloud projects describe YOUR_PROJECT_ID`
 3. Ensure dataset exists: `(cd infra && ./50-ensure-dev-datasets.sh)`
 
+#### "Permission denied while getting Drive credentials"
+
+A model reads a Google Sheet external table and your ADC token has no Drive scope. Re-run the `application-default login --scopes=...drive.readonly` command in [Step 3](#step-3-authenticate-with-gcp). If it happens in CI or prod, share the Sheet with that service account.
+
 #### "Dataset not found" error
 
 **Solution:** Create your dev dataset
@@ -587,7 +601,7 @@ Note on INT_DATASET:
 Runtime defaults (Cloud Run Job):
 
 * Runs `dbt build` then `dbt source freshness` by default in prod (set `RUN_FRESHNESS=false` to disable, or scope with `FRESHNESS_SELECT`).
-* Uploads `manifest.json`, `run_results.json`, and `sources.json` to `gs://$DBT_ARTIFACTS_BUCKET/prod/`.
+* Uploads `manifest.json`, `run_results.json`, and `sources.json` to `gs://$DBT_ARTIFACTS_BUCKET/prod/`. A failed build, freshness check or docs step still uploads `run_results.json` and `sources.json` and then exits non-zero. `manifest.json` is replaced whenever every model, seed and snapshot built, even if data tests failed. The last uploaded one is kept (CI defers against it) when a model, seed or snapshot errored or was skipped, when the build's `run_results.json` is missing, or when `dbt build` exits 2 or higher. The job log says which case applied.
 * Optionally generates docs (`GENERATE_DOCS=true`) and uploads `target/index.html` to `gs://$DBT_DOCS_BUCKET/index.html` (falls back to `DBT_ARTIFACTS_BUCKET` if `DBT_DOCS_BUCKET` is unset).
 
 > Cloud Run **Jobs** are built for batch/ETL: they run to completion and can be executed on a schedule by Cloud Scheduler without standing up servers.
