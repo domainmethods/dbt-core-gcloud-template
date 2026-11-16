@@ -81,7 +81,8 @@ metric_filter() {  # $1 = log metric name -> the --log-filter it was created wit
 }
 
 POLICIES=("Cloud Run Job Errors (dbt-prod-run)" "Cloud Scheduler Job Errors (dbt-prod-nightly)" \
-  "BigQuery Job Errors (Production)" "Cloud Run Job Failures (dbt-prod-run)")
+  "BigQuery Job Errors (Production)" "Cloud Run Job Failures (dbt-prod-run)" \
+  "Cloud Run Job Missing Run (dbt-prod-run)")
 
 seed_existing_policies() {
   local i=1 p
@@ -93,8 +94,8 @@ make_sandbox
 run_case ''
 assert_eq "$RUN_RC" "0" "script exits 0"
 assert_contains "$RUN_OUT" "Monitoring alerts ensured." "script runs to the end"
-assert_eq "$(grep -c 'logging metrics create' <<<"$CALLS")" "4" "creates 4 log metrics"
-assert_eq "$(grep -c 'policies create' <<<"$CALLS")" "4" "creates 4 policies"
+assert_eq "$(grep -c 'logging metrics create' <<<"$CALLS")" "5" "creates 5 log metrics"
+assert_eq "$(grep -c 'policies create' <<<"$CALLS")" "5" "creates 5 policies"
 assert_eq "$(grep -c 'policies update' <<<"$CALLS")" "0" "updates none"
 all_valid=1
 for f in "$SANDBOX"/policy_files/*.json; do jq -e . "$f" >/dev/null 2>&1 || { all_valid=0; echo "      invalid JSON: $f"; }; done
@@ -138,7 +139,7 @@ run_case ''
 assert_eq "$RUN_RC" "0" "script exits 0"
 assert_contains "$RUN_OUT" "Monitoring alerts ensured." "script runs to the end"
 assert_eq "$(grep -c 'policies create' <<<"$CALLS")" "0" "creates none"
-assert_eq "$(grep -c 'policies update' <<<"$CALLS")" "4" "updates all 4"
+assert_eq "$(grep -c 'policies update' <<<"$CALLS")" "5" "updates all 5"
 assert_contains "$CALLS" "policies update projects/test-proj/alertPolicies/103 --policy-from-file=" "updates by resource name"
 assert_not_contains "$RUN_OUT" "Policy exists" "no silent no-op"
 assert_contains "$(jq -c '.conditions[0].conditionThreshold.filter' "$(policy_file "Cloud Run Job Failures (dbt-prod-run)")")" \
@@ -171,6 +172,40 @@ make_sandbox; seed_existing_policies
 echo '{"filter":"resource.type=\"cloud_run_job\" severity>=ERROR","description":"old"}' > "$SANDBOX/metrics/cloud_run_job_errors"
 run_case ''
 assert_contains "$CALLS" "logging metrics update cloud_run_job_errors" "updates the drifted metric"
+
+echo "scenario 10: missing-run alert fires when no run summary arrives (#61)"
+make_sandbox
+run_case ''
+f=$(metric_filter cloud_run_job_dbt_summary_heartbeat)
+assert_contains "$f" 'jsonPayload.dbt_summary.total>0' "heartbeat counts only summaries with results"
+assert_contains "$f" 'resource.labels.job_name="dbt-prod-run"' "heartbeat scoped to the job"
+assert_contains "$f" 'resource.labels.location="us-central1"' "heartbeat scoped to the region"
+pf=$(policy_file "Cloud Run Job Missing Run (dbt-prod-run)")
+ct=$(jq -c '.conditions[0].conditionThreshold' "$pf")
+assert_contains "$ct" 'logging.googleapis.com/user/cloud_run_job_dbt_summary_heartbeat' "policy reads the heartbeat metric"
+assert_eq "$(jq -r '[.comparison, .thresholdValue, .duration, .evaluationMissingData] | join(" ")' <<<"$ct")" \
+  "COMPARISON_LT 1 88200s EVALUATION_MISSING_DATA_ACTIVE" "fewer than 1 heartbeat for 24h30m, missing data breaches"
+assert_eq "$(jq -r '.aggregations[0] | [.alignmentPeriod, .perSeriesAligner, .crossSeriesReducer] | join(" ")' <<<"$ct")" \
+  "3600s ALIGN_SUM REDUCE_SUM" "1h ALIGN_SUM, summed across series"
+assert_eq "$(jq 'has("conditionAbsent")' <<<"$(jq -c '.conditions[0]' "$pf")")" "false" "no conditionAbsent (capped at 23.5h)"
+doc=$(jq -r '.documentation.content' "$pf")
+assert_contains "$doc" "dbt-prod-run" "runbook names the job"
+assert_contains "$doc" "dbt-prod-nightly" "runbook names the scheduler job"
+assert_contains "$doc" "us-central1" "runbook names the region"
+assert_contains "$doc" "auto-closes" "runbook warns about the incident after a create or update"
+
+echo "scenario 11: MISSING_RUN_DURATION is configurable and capped at 88200s (#61)"
+make_sandbox
+run_case 'MISSING_RUN_DURATION=7200s'
+assert_eq "$(jq -r '.conditions[0].conditionThreshold.duration' "$(policy_file "Cloud Run Job Missing Run (dbt-prod-run)")")" "7200s" "custom duration used"
+make_sandbox
+run_case 'MISSING_RUN_DURATION=93600s'
+assert_eq "$RUN_RC" "2" "over the API cap exits 2"
+assert_contains "$RUN_OUT" "88200s" "error names the cap"
+assert_not_contains "$CALLS" "create" "fails before changing anything"
+make_sandbox
+run_case 'MISSING_RUN_DURATION=26h'
+assert_eq "$RUN_RC" "2" "a non-seconds value exits 2"
 
 echo "results: passed: $PASS_COUNT, failed: $FAIL_COUNT"
 [[ $FAIL_COUNT -eq 0 ]]

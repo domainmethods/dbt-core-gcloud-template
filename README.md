@@ -441,7 +441,7 @@ Optional helpers (as needed):
 * [infra/80-deploy-docs-viewer.sh](#docs-viewer-cloud-run-iam-only) — Deploy private Cloud Run docs viewer service (reads index.html from GCS).
 * [infra/81-grant-docs-viewer-access.sh](#docs-viewer-cloud-run-iam-only) — Grant run.invoker to users/groups for the docs viewer.
 * [infra/85-ensure-notification-channels.sh](#monitoring) — Create/reuse Monitoring email channels; writes NOTIFICATION_CHANNELS.
-* [infra/90-monitoring.sh](#monitoring) — Ensure alerting policies for Run Job, Scheduler, and BigQuery errors.
+* [infra/90-monitoring.sh](#monitoring) — Ensure alerting policies for Run Job, Scheduler, and BigQuery errors, and for a nightly run that never happens.
 * [infra/15-artifacts-lifecycle.sh](#docs--artifacts) — Set GCS lifecycle on artifacts/docs bucket (e.g., delete objects >30 days).
 * [infra/check-operator-iam.sh](#operator-iam-to-run-infra-scripts) — Check current operator’s project roles; helpful before running bootstrap.
 
@@ -854,8 +854,8 @@ Automatic upload on prod runs:
 
 Set up basic monitoring for failures across the stack using log‑based metrics and alerting policies.
 
-* Metrics: `cloud_run_job_errors` (execution logs; audit logs excluded), `cloud_run_job_failures` (task-level text match, for dashboards), `cloud_scheduler_job_errors`, `bigquery_job_errors` (skips transients dbt retries past).
-* Policies: alert when count > 0 over 5 minutes; uses `gcloud beta/alpha monitoring policies`. The job failure policy uses the built-in `run.googleapis.com/job/completed_execution_count` (`result="failed"`), so it fires only when a whole execution fails after task retries.
+* Metrics: `cloud_run_job_errors` (execution logs; audit logs excluded), `cloud_run_job_failures` (task-level text match, for dashboards), `cloud_scheduler_job_errors`, `bigquery_job_errors` (skips transients dbt retries past), `cloud_run_job_dbt_summary_heartbeat` (one per run that logged a dbt summary with results).
+* Policies: alert when count > 0 over 5 minutes; uses `gcloud beta/alpha monitoring policies`. The job failure policy uses the built-in `run.googleapis.com/job/completed_execution_count` (`result="failed"`), so it fires only when a whole execution fails after task retries. The missing-run policy fires when no heartbeat arrives for `MISSING_RUN_DURATION` (default and maximum `88200s`, 24h30m), so a paused scheduler or a job that never starts still pages. Lower it for jobs that run more than once a day.
 * Channels: optional but recommended via `infra/85-ensure-notification-channels.sh` (sets `NOTIFICATION_CHANNELS`).
 
 Usage
@@ -872,6 +872,7 @@ Notes
 
 * Requires an up‑to‑date `gcloud` with Monitoring alpha/beta commands.
 * Safe to re‑run: existing metrics and policies are updated in place to match the script. With `NOTIFICATION_CHANNELS` unset, a policy keeps the channels it already has.
+* Creating or updating the missing-run policy opens one short incident a few minutes after the next run's summary. It closes on its own.
 
 ## Operational Notes
 

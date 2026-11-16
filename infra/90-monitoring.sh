@@ -10,6 +10,13 @@ SCHED_REGION=${SCHED_REGION:-$REGION}
 JOB_NAME=${JOB_NAME:-dbt-prod-run}
 SCHED_JOB_NAME=${SCHED_JOB_NAME:-dbt-prod-nightly}
 CHANNELS=${NOTIFICATION_CHANNELS:-}
+# How long without a run summary before the missing-run alert opens (#61). The API
+# rejects threshold durations above 24h30m, so a daily job can't wait longer than that.
+MISSING_RUN_DURATION=${MISSING_RUN_DURATION:-88200s}
+if [[ ! "$MISSING_RUN_DURATION" =~ ^[0-9]+s$ ]] || (( ${MISSING_RUN_DURATION%s} > 88200 )); then
+  echo "[error] MISSING_RUN_DURATION=$MISSING_RUN_DURATION: use seconds, at most 88200s (the API's 24h30m cap)" >&2
+  exit 2
+fi
 
 # Validate notification channels if provided
 if [[ -n "$CHANNELS" ]]; then
@@ -129,6 +136,35 @@ $(documentation_json "$doc")
 JSON
 }
 
+# Dead-man's switch: fires when fewer than one run summary with results arrives within
+# the duration. Missing data counts as breaching, so a job that never starts fires too.
+# conditionAbsent can't be used: it is capped at 23.5h, under a daily cadence.
+missing_run_policy_json() {
+  local display="$1" duration="$2" doc="${3:-}"
+  cat <<JSON
+{
+  "displayName": "$display",
+  "combiner": "OR",
+$(documentation_json "$doc")
+  "conditions": [
+    {
+      "displayName": "$display condition",
+      "conditionThreshold": {
+        "filter": "metric.type=\"logging.googleapis.com/user/cloud_run_job_dbt_summary_heartbeat\" resource.type=\"cloud_run_job\"",
+        "aggregations": [
+          {"alignmentPeriod": "3600s", "perSeriesAligner": "ALIGN_SUM", "crossSeriesReducer": "REDUCE_SUM"}
+        ],
+        "comparison": "COMPARISON_LT",
+        "thresholdValue": 1,
+        "duration": "$duration",
+        "evaluationMissingData": "EVALUATION_MISSING_DATA_ACTIVE"
+      }
+    }
+  ]
+}
+JSON
+}
+
 # Create the policy, or update it in place if one with this displayName exists, so
 # edits to filters, thresholds or runbooks reach existing deployments on re-run (#54).
 # With NOTIFICATION_CHANNELS unset, an update keeps the policy's current channels.
@@ -215,6 +251,13 @@ ensure_log_metric "bigquery_job_errors" \
   "resource.type=\"bigquery_project\" severity>=ERROR protoPayload.authenticationInfo.principalEmail=\"${PROD_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com\" -protoPayload.status.code=14 -protoPayload.status.code=6 -protoPayload.status.message:\"Google Sheets service overloaded\"" \
   "BigQuery job errors from production service account (${PROD_SA_ID})"
 
+# One per run that produced results. entrypoint.sh prints {"dbt_summary": {...}}, which
+# Cloud Run parses into jsonPayload. The missing_run_results variant has no `total`,
+# so a run that dies before dbt writes results is not a heartbeat.
+ensure_log_metric "cloud_run_job_dbt_summary_heartbeat" \
+  "resource.type=\"cloud_run_job\" resource.labels.location=\"${REGION}\" resource.labels.job_name=\"${JOB_NAME}\" jsonPayload.dbt_summary.total>0" \
+  "Run summaries with results from Cloud Run Job ${JOB_NAME} (missing-run heartbeat)"
+
 TMP=$(mktemp)
 trap 'rm -f "$TMP" "${TMP}.chan"' EXIT
 
@@ -235,6 +278,18 @@ A Cloud Run execution failed after all task retries. A task attempt that failed 
 3. If it is a source or auth problem, check the upstream load before re-running.
 EOF
 
+# Unquoted delimiter: the names are baked in, because the condition sums across series
+# and drops the labels that ${resource.label.*} would read.
+read -r -d '' MISSING_RUN_DOC <<EOF || true
+No run of Cloud Run job ${JOB_NAME} (${REGION}) has logged a dbt summary with results for ${MISSING_RUN_DURATION}. Error and failure alerts need a run to fire, so this one covers the job not running at all.
+
+1. Check Cloud Scheduler job ${SCHED_JOB_NAME} (${SCHED_REGION}): is it paused, and did its last attempt succeed? A 403 means its service account lost run.invoker on the job.
+2. Check the job's executions. If one started but logged no summary, it died before dbt wrote results: read its logs.
+3. After fixing, run the job once. The alert closes on the next summary.
+
+Creating or updating this policy opens one short incident a few minutes after the next run's summary. It auto-closes; no action needed.
+EOF
+
 # Policies (count > 0 over 5m). Use DELTA to count new events in window.
 metric_policy_json "Cloud Run Job Errors (${JOB_NAME})" "cloud_run_job_errors" "cloud_run_job" "300s" "ALIGN_DELTA" "COMPARISON_GT" 0 "300s" > "$TMP"
 ensure_policy "Cloud Run Job Errors (${JOB_NAME})" "$TMP"
@@ -248,5 +303,9 @@ ensure_policy "BigQuery Job Errors (Production)" "$TMP"
 # Alert on executions that failed after all task retries (#58)
 execution_failure_policy_json "Cloud Run Job Failures (${JOB_NAME})" "$JOB_NAME" "$REGION" "$CLOUD_RUN_FAILURES_DOC" > "$TMP"
 ensure_policy "Cloud Run Job Failures (${JOB_NAME})" "$TMP"
+
+# Alert when no run has produced results for MISSING_RUN_DURATION (#61)
+missing_run_policy_json "Cloud Run Job Missing Run (${JOB_NAME})" "$MISSING_RUN_DURATION" "$MISSING_RUN_DOC" > "$TMP"
+ensure_policy "Cloud Run Job Missing Run (${JOB_NAME})" "$TMP"
 
 echo "Monitoring alerts ensured."
