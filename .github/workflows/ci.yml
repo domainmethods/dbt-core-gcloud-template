@@ -21,6 +21,7 @@ jobs:
           bash scripts/tests/test_pr_data_diff.sh
           bash scripts/tests/test_get_changed_models.sh
           bash scripts/tests/test_ci_build.sh
+          bash scripts/tests/test_upsert_pr_comment.sh
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -195,15 +196,9 @@ jobs:
             } catch (e) {
               body = '# dbt Data Diff Summary\n\n(No changes or no summary generated)';
             }
-            const runId = context.runId;
-            const runNumber = context.runNumber;
-            const fullBody = `<!-- dbt-data-diff-${runId} -->\n${body}\n\n---\n*Run #${runNumber} (${runId})*`;
-            const { owner, repo } = context.repo;
-            const issue_number = context.issue.number;
-
-            // Always create a new comment (no longer updating existing ones)
-            console.log('Creating new dbt data diff comment for run', runId);
-            await github.rest.issues.createComment({ owner, repo, issue_number, body: fullBody });
+            // One comment per kind, updated in place; the previous run is kept collapsed (#41).
+            const upsert = require(`${process.env.GITHUB_WORKSPACE}/scripts/lib/upsert_pr_comment.js`);
+            await upsert({ github, context, kind: 'dbt-data-diff', body });
 
       - name: Post schema summary comment on PR
         if: ${{ steps.schema_diff.outcome == 'success' && hashFiles('schema_diff_reports/schema-summary.md') != '' && github.event.pull_request.head.repo.full_name == github.repository }}
@@ -218,13 +213,8 @@ jobs:
             } catch (e) {
               body = '# dbt Schema Diff Summary\n\n(No changes or no summary generated)';
             }
-            const runId = context.runId;
-            const runNumber = context.runNumber;
-            const fullBody = `<!-- dbt-schema-diff-${runId} -->\n${body}\n\n---\n*Run #${runNumber} (${runId})*`;
-            const { owner, repo } = context.repo;
-            const issue_number = context.issue.number;
-            console.log('Creating new dbt schema diff comment for run', runId);
-            await github.rest.issues.createComment({ owner, repo, issue_number, body: fullBody });
+            const upsert = require(`${process.env.GITHUB_WORKSPACE}/scripts/lib/upsert_pr_comment.js`);
+            await upsert({ github, context, kind: 'dbt-schema-diff', body });
 
       - name: Cleanup dataset
         if: always()
