@@ -17,7 +17,10 @@ Convention: keep UTC TIMESTAMPs until the mart layer and convert once there.
    breaks, so sqlfluff's multi-line layout is still caught.
 
 Comments (`--`, `/* */`, `{# #}`) are stripped first, so a note describing the
-wrong expression does not trip the check.
+wrong expression does not trip the check. Stripping is string-literal aware
+(single, double and backtick quotes, triple quotes, backslash escapes), so a
+'--' or LIKE '%/*%' in a string cannot hide the code after it, and the
+double-shift text inside a string literal is not mistaken for code.
 
 Configuration (environment variables):
   TZ_LINT_ZONES   comma-separated zone names to treat as a conversion, e.g.
@@ -55,34 +58,69 @@ def utc_layers() -> tuple[str, ...]:
     return tuple(p.strip().rstrip("/") + "/" for p in raw.split(",") if p.strip())
 
 
-def code_lines(text: str) -> list[str]:
-    """Return the file's lines with comments blanked, keeping line numbers."""
-    out, in_block, closer = [], False, ""
-    for line in text.splitlines():
-        code, i = "", 0
-        while i < len(line):
-            if in_block:
-                end = line.find(closer, i)
-                if end < 0:
-                    i = len(line)
-                    continue
-                in_block, i = False, end + len(closer)
-            elif line.startswith("--", i):
-                break
-            elif line.startswith("/*", i) or line.startswith("{#", i):
-                in_block = True
-                closer = "*/" if line.startswith("/*", i) else "#}"
-                i += 2
-            else:
-                code += line[i]
-                i += 1
-        out.append(code)
-    return out
+def blank(segment: str) -> str:
+    """Replace every character except newlines with a space, keeping offsets."""
+    return "".join(ch if ch == "\n" else " " for ch in segment)
+
+
+def scan(text: str) -> tuple[str, str, list[tuple[int, int]]]:
+    """Separate code, comments and string literals, keeping every offset.
+
+    Returns (code, mask, strings):
+      code     the text with comments blanked; string literals kept verbatim.
+      mask     code with string literals blanked too, for structural matching
+               (so 'DATETIME(TIMESTAMP(' inside a string is not code).
+      strings  (start, end) offsets of each string literal's contents.
+
+    String-literal aware, so '--' or '%/*%' inside a string never starts a
+    comment. Handles BigQuery single, double and backtick quotes, triple-quoted
+    strings and backslash escapes. A single-quoted string ends at a newline
+    (BigQuery does not let one span lines), so a stray quote cannot swallow the
+    rest of the file.
+    """
+    code, mask, strings = [], [], []
+    i, n = 0, len(text)
+    while i < n:
+        two = text[i:i + 2]
+        if two == "--":
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            code.append(blank(text[i:j]))
+        elif two in ("/*", "{#"):
+            j = text.find("*/" if two == "/*" else "#}", i + 2)
+            j = n if j < 0 else j + 2
+            code.append(blank(text[i:j]))
+        elif text[i] in "'\"`":
+            quote = text[i:i + 3] if text[i:i + 3] in ("'''", '"""') else text[i]
+            j = i + len(quote)
+            while j < n and not text.startswith(quote, j):
+                if text[j] == "\\":
+                    j += 2  # an escaped character never closes the string
+                elif text[j] == "\n" and len(quote) == 1:
+                    break
+                else:
+                    j += 1
+            j = min(j, n)
+            strings.append((i + len(quote), j))
+            if text.startswith(quote, j):
+                j += len(quote)
+            code.append(text[i:j])
+            mask.append(blank(text[i:j]))
+            i = j
+            continue
+        else:
+            j = i + 1
+            code.append(text[i])
+        mask.append(code[-1])
+        i = j
+    return "".join(code), "".join(mask), strings
 
 
 def check_file(path: Path, rel: str, zone: re.Pattern, layers: tuple[str, ...]) -> list[str]:
-    raw = path.read_text(encoding="utf-8").splitlines()
-    code = code_lines("\n".join(raw))
+    text = path.read_text(encoding="utf-8")
+    raw = text.splitlines()
+    code_text, mask, _ = scan(text)
+    code = code_text.split("\n")
     in_utc_layer = rel.startswith(layers)
     errors = []
 
@@ -97,9 +135,8 @@ def check_file(path: Path, rel: str, zone: re.Pattern, layers: tuple[str, ...]) 
             )
     # Match the whole file: sqlfluff splits DATETIME(\n TIMESTAMP(x),\n tz) across
     # lines, which a per-line regex never sees.
-    joined = "\n".join(code)
-    for m in DOUBLE_SHIFT.finditer(joined):
-        n = joined.count("\n", 0, m.start())
+    for m in DOUBLE_SHIFT.finditer(mask):
+        n = mask.count("\n", 0, m.start())
         if not suppressed(n):
             errors.append(
                 f"{rel}:{n + 1}: DATETIME(TIMESTAMP(...)) -- the double-shift shape. If the "
