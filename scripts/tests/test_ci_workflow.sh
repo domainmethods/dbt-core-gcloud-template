@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Static checks on .github/workflows/ci.yml, since this repo's Actions can't be run
+# locally: docs-only PRs must not touch BigQuery (#29), and yamllint runs as its own
+# fast job that gates the BigQuery build (#33).
+# Needs python3 with PyYAML (installed with yamllint). No `set -e`.
+#
+# Usage: bash scripts/tests/test_ci_workflow.sh
+set -uo pipefail
+
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+PASS_COUNT=0; FAIL_COUNT=0
+pass() { echo "    ok   - $1"; PASS_COUNT=$((PASS_COUNT + 1)); }
+fail() { echo "    FAIL - $1"; FAIL_COUNT=$((FAIL_COUNT + 1)); }
+assert_contains() { [[ "$1" == *"$2"* ]] && pass "$3" || fail "$3 (missing '$2')"; }
+assert_eq() { [[ "$1" == "$2" ]] && pass "$3" || fail "$3 (got '$1', want '$2')"; }
+
+# wf <python expression over `w`, the parsed workflow> -> printed result
+wf() {
+  python3 -c 'import sys, yaml
+w = yaml.safe_load(open(sys.argv[1]))
+print(eval(sys.argv[2]))' "$REPO_ROOT/.github/workflows/ci.yml" "$1"
+}
+step_if() {  # $1 = bigquery-ci step name -> its `if:` ("" if none or missing)
+  wf "next((s.get('if', '') for s in w['jobs']['bigquery-ci']['steps'] if s.get('name') == '$1'), 'MISSING')"
+}
+
+echo "scenario 1: docs-only PRs skip every BigQuery step (#29)"
+for step in "Create ephemeral dataset" "Generate docs (optional preview)" \
+            "Generate schema diffs for changed models" "Cleanup dataset"; do
+  assert_contains "$(step_if "$step")" "env.HAS_MODEL_CHANGES != 'false'" "'$step' gated on HAS_MODEL_CHANGES"
+done
+assert_contains "$(step_if "Cleanup dataset")" "always()" "cleanup still runs after a failed build"
+
+echo "scenario 2: yamllint is its own job and gates bigquery-ci (#33)"
+assert_eq "$(wf "'yamllint' in w['jobs']")" "True" "yamllint job exists"
+assert_eq "$(wf "sorted(w['jobs']['bigquery-ci']['needs'])")" "['lint', 'yamllint']" "bigquery-ci needs lint and yamllint"
+assert_contains "$(wf "' '.join(s.get('run', '') for s in w['jobs']['yamllint']['steps'])")" "yamllint ." "lints the whole repo"
+assert_eq "$(wf "any('dbt' in s.get('run', '') for s in w['jobs']['yamllint']['steps'])")" "False" "no dbt install in the yamllint job"
+assert_contains "$(wf "str([s.get('env', {}) for s in w['jobs']['lint']['steps']])")" "'SKIP': 'yamllint'" "lint job no longer runs yamllint twice"
+
+echo "results: passed: $PASS_COUNT, failed: $FAIL_COUNT"
+[[ $FAIL_COUNT -eq 0 ]]

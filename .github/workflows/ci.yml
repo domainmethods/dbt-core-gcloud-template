@@ -2,8 +2,8 @@ name: ci-pr
 
 on:
   pull_request:
-    branches: [ main ]
-    paths-ignore: [ "README.md" ]
+    branches: [main]
+    paths-ignore: ["README.md"]
 
 env:
   DBT_BQ_LOCATION: US
@@ -11,6 +11,22 @@ env:
   DBT_PROFILES_DIR: ./profiles
 
 jobs:
+  # Seconds, not minutes: no dbt install, so a YAML typo fails before the BigQuery build (#33).
+  yamllint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: yamllint (every YAML file; config in .yamllint)
+        run: |
+          python -m pip install yamllint==1.37.1
+          yamllint .
+      # PyYAML comes with yamllint, which these checks need.
+      - name: Check ci.yml gates
+        run: bash scripts/tests/test_ci_workflow.sh
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -22,6 +38,7 @@ jobs:
           bash scripts/tests/test_get_changed_models.sh
           bash scripts/tests/test_ci_build.sh
           bash scripts/tests/test_lookup_prod_manifest.sh
+          bash scripts/tests/test_entrypoint.sh
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -35,6 +52,8 @@ jobs:
         with:
           extra_args: --hook-stage manual --all-files --show-diff-on-failure
         env:
+          # yamllint has its own job
+          SKIP: yamllint
           # Ensure sqlfluff's dbt templater can resolve a profile without real credentials
           DBT_TARGET: ci
           DBT_PROFILES_DIR: ./profiles
@@ -43,7 +62,7 @@ jobs:
           DBT_BQ_LOCATION: US
 
   bigquery-ci:
-    needs: [lint]
+    needs: [lint, yamllint]
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -94,7 +113,10 @@ jobs:
           # Ensure dbt-bigquery (profiles.ci) finds the credentials file minted by auth step
           echo "GOOGLE_APPLICATION_CREDENTIALS=${{ steps.auth.outputs.credentials_file_path }}" >> $GITHUB_ENV
 
+      # Docs/config-only PRs (HAS_MODEL_CHANGES=false) only run `dbt parse`, so they
+      # skip every step that touches BigQuery (#29).
       - name: Create ephemeral dataset
+        if: ${{ env.HAS_MODEL_CHANGES != 'false' }}
         run: bash scripts/create_bq_dataset.sh
 
       - name: Slim CI build (with defer if prod manifest exists)
@@ -123,7 +145,7 @@ jobs:
           fi
 
       - name: Generate docs (optional preview)
-        if: ${{ steps.dbt_build.outcome == 'success' }}
+        if: ${{ steps.dbt_build.outcome == 'success' && env.HAS_MODEL_CHANGES != 'false' }}
         continue-on-error: true
         run: dbt docs generate --static
 
@@ -138,7 +160,7 @@ jobs:
       # posted as if it were complete.
       - name: Generate schema diffs for changed models
         id: schema_diff
-        if: ${{ steps.dbt_build.outcome == 'success' }}
+        if: ${{ steps.dbt_build.outcome == 'success' && env.HAS_MODEL_CHANGES != 'false' }}
         continue-on-error: true
         timeout-minutes: 10
         run: bash scripts/pr_schema_diff.sh
@@ -228,5 +250,5 @@ jobs:
             await github.rest.issues.createComment({ owner, repo, issue_number, body: fullBody });
 
       - name: Cleanup dataset
-        if: always()
+        if: ${{ always() && env.HAS_MODEL_CHANGES != 'false' }}
         run: bash scripts/drop_bq_dataset.sh

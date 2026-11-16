@@ -1,0 +1,20 @@
+# Shared by the pre-commit hook and CI's yamllint job (#33).
+extends: default
+
+ignore: |
+  dbt_packages/
+  target/
+  logs/
+
+rules:
+  line-length:
+    max: 140
+    # GitHub expressions and env-var defaults run long and can't be wrapped.
+    ignore: |
+      .github/workflows/
+      profiles/
+  document-start: disable
+  truthy: disable
+  comments-indentation: disable
+  indentation: disable
+  empty-lines: disable
