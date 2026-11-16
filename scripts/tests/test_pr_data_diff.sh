@@ -60,5 +60,17 @@ RUN_OUT=$(cd "$SANDBOX" && env -i PATH="$SANDBOX/bin:/usr/bin:/bin" \
 [[ $RC -ne 0 ]] && pass "exits non-zero on lookup error" || fail "exits non-zero on lookup error (exit $RC)"
 assert_not_contains "$(cat "$DBT_CALL_LOG" 2>/dev/null)" "ls" "never selects models after a lookup error"
 
+echo "scenario 5: lookup script exits with an unexpected code (127) → exits non-zero, no dbt ls (#74)"
+make_sandbox
+mkdir -p "$SANDBOX/scripts"
+cp "$SCRIPT" "$SANDBOX/scripts/pr_data_diff.sh"
+printf '#!/usr/bin/env bash\nexit 127\n' > "$SANDBOX/scripts/lookup_prod_manifest.sh"
+RUN_OUT=$(cd "$SANDBOX" && env -i PATH="$SANDBOX/bin:/usr/bin:/bin" \
+  DBT_CALL_LOG="$DBT_CALL_LOG" ARTIFACT_DIR="$SANDBOX/diff_reports" \
+  DBT_GCP_PROJECT_CI=ciproj DBT_BQ_DATASET=ci_ds DBT_ARTIFACTS_BUCKET=fake-bucket \
+  HAS_MODEL_CHANGES=true bash "$SANDBOX/scripts/pr_data_diff.sh" 2>&1); RC=$?
+[[ $RC -ne 0 ]] && pass "exits non-zero on unexpected lookup exit code" || fail "exits non-zero on unexpected lookup exit code (exit $RC)"
+assert_not_contains "$(cat "$DBT_CALL_LOG" 2>/dev/null)" "ls" "never selects models after an unexpected lookup exit code"
+
 echo "results: passed: $PASS_COUNT, failed: $FAIL_COUNT"
 [[ $FAIL_COUNT -eq 0 ]]

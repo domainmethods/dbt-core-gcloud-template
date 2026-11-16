@@ -39,13 +39,17 @@ echo "=== Slim CI State Detection ==="
 echo "DBT_ARTIFACTS_BUCKET: ${DBT_ARTIFACTS_BUCKET:-<unset>}"
 echo "Checking for production manifest at: gs://${DBT_ARTIFACTS_BUCKET:-<unset>}/prod/manifest.json"
 
-if [[ -n "${DBT_ARTIFACTS_BUCKET:-}" ]]; then
-  # Only a missing manifest falls back to a full build. A lookup error, a failed
-  # download or a corrupt manifest fails the job instead of hiding behind green (#74).
+if [[ "${HAS_MODEL_CHANGES:-true}" == "false" ]]; then
+  # Parse-only run below never uses the manifest, so a GCS error must not fail it.
+  echo "No dbt model changes; skipping production manifest lookup"
+elif [[ -n "${DBT_ARTIFACTS_BUCKET:-}" ]]; then
+  # Only a missing manifest (exit 2) falls back to a full build. A lookup error (or
+  # any other exit code), a failed download or a corrupt manifest fails the job
+  # instead of hiding behind green (#74).
   manifest_lookup=0
   bash "$(dirname "$0")/lookup_prod_manifest.sh" "gs://${DBT_ARTIFACTS_BUCKET}/prod/manifest.json" \
     || manifest_lookup=$?
-  if [[ ${manifest_lookup} -eq 1 ]]; then
+  if [[ ${manifest_lookup} -ne 0 && ${manifest_lookup} -ne 2 ]]; then
     echo "✗ Could not check for the production manifest; failing rather than building without --defer"
     exit 1
   fi

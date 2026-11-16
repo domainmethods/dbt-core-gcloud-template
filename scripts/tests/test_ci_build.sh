@@ -121,5 +121,32 @@ chmod +x "$SANDBOX8/bin/dbt" "$SANDBOX8/bin/gsutil"
 [[ $RC8 -ne 0 ]] && pass "job fails on corrupt manifest" || fail "job fails on corrupt manifest (exit $RC8)"
 assert_not_contains "$(cat "$DBT_CALL_LOG")" "build" "no full build on corrupt manifest"
 
+echo "scenario: docs-only (HAS_MODEL_CHANGES=false) + lookup error → parse only, no lookup"
+: > "$DBT_CALL_LOG"
+SANDBOX9=$(mktemp -d); mkdir -p "$SANDBOX9/bin"
+printf '#!/usr/bin/env bash\necho "dbt $*" >> "$DBT_CALL_LOG"\n' > "$SANDBOX9/bin/dbt"
+printf '#!/usr/bin/env bash\necho "gsutil $*" >> "$DBT_CALL_LOG"\necho "AccessDeniedException: 401 Anonymous caller" >&2\nexit 1\n' > "$SANDBOX9/bin/gsutil"
+chmod +x "$SANDBOX9/bin/dbt" "$SANDBOX9/bin/gsutil"
+( cd "$SANDBOX9" && env -i PATH="$SANDBOX9/bin:/usr/bin:/bin" DBT_CALL_LOG="$DBT_CALL_LOG" \
+    DBT_ARTIFACTS_BUCKET="fake-bucket" PROD_MANIFEST_RETRY_DELAY=0 \
+    HAS_MODEL_CHANGES=false bash "$SCRIPT" >/dev/null 2>&1 ); RC9=$?
+[[ $RC9 -eq 0 ]] && pass "docs-only PR passes despite lookup error" || fail "docs-only PR passes despite lookup error (exit $RC9)"
+assert_contains "$(cat "$DBT_CALL_LOG")" "parse --target ci" "docs-only PR runs dbt parse"
+assert_not_contains "$(cat "$DBT_CALL_LOG")" "gsutil" "docs-only PR skips the manifest lookup"
+
+echo "scenario: lookup script exits with an unexpected code (127) → job fails, no build (#74)"
+: > "$DBT_CALL_LOG"
+SANDBOX10=$(mktemp -d); mkdir -p "$SANDBOX10/bin" "$SANDBOX10/scripts"
+printf '#!/usr/bin/env bash\necho "dbt $*" >> "$DBT_CALL_LOG"\n' > "$SANDBOX10/bin/dbt"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$SANDBOX10/bin/gsutil"
+chmod +x "$SANDBOX10/bin/dbt" "$SANDBOX10/bin/gsutil"
+cp "$SCRIPT" "$SANDBOX10/scripts/ci_build.sh"
+printf '#!/usr/bin/env bash\nexit 127\n' > "$SANDBOX10/scripts/lookup_prod_manifest.sh"
+( cd "$SANDBOX10" && env -i PATH="$SANDBOX10/bin:/usr/bin:/bin" DBT_CALL_LOG="$DBT_CALL_LOG" \
+    DBT_ARTIFACTS_BUCKET="fake-bucket" HAS_MODEL_CHANGES=true \
+    bash "$SANDBOX10/scripts/ci_build.sh" >/dev/null 2>&1 ); RC10=$?
+[[ $RC10 -ne 0 ]] && pass "job fails on unexpected lookup exit code" || fail "job fails on unexpected lookup exit code (exit $RC10)"
+assert_not_contains "$(cat "$DBT_CALL_LOG")" "build" "no full build on unexpected lookup exit code"
+
 echo "results: passed: $PASS_COUNT, failed: $FAIL_COUNT"
 [[ $FAIL_COUNT -eq 0 ]]
