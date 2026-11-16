@@ -52,22 +52,43 @@ echo "scenario 3: no DIFF_SELECT, manifest present → state:modified+"
 WITH_MANIFEST=1 run_case 'HAS_MODEL_CHANGES=true'
 assert_contains "$(cat "$DBT_CALL_LOG")" "state:modified+" "uses state comparison when scope absent"
 
+echo "scenario 4: manifest lookup fails (auth error) → exits non-zero, no dbt ls (#74)"
+make_sandbox
+printf '#!/usr/bin/env bash\necho "AccessDeniedException: 403" >&2\nexit 1\n' > "$SANDBOX/bin/gsutil"
+RUN_OUT=$(cd "$SANDBOX" && env -i PATH="$SANDBOX/bin:/usr/bin:/bin" \
+  DBT_CALL_LOG="$DBT_CALL_LOG" ARTIFACT_DIR="$SANDBOX/diff_reports" \
+  DBT_GCP_PROJECT_CI=ciproj DBT_BQ_DATASET=ci_ds DBT_ARTIFACTS_BUCKET=fake-bucket \
+  PROD_MANIFEST_RETRY_DELAY=0 HAS_MODEL_CHANGES=true "$BASH" "$SCRIPT" 2>&1); RC=$?
+[[ $RC -ne 0 ]] && pass "exits non-zero on lookup error" || fail "exits non-zero on lookup error (exit $RC)"
+assert_not_contains "$(cat "$DBT_CALL_LOG" 2>/dev/null)" "ls" "never selects models after a lookup error"
+
+echo "scenario 5: lookup script exits with an unexpected code (127) → exits non-zero, no dbt ls (#74)"
+make_sandbox
+mkdir -p "$SANDBOX/scripts"
+cp "$SCRIPT" "$SANDBOX/scripts/pr_data_diff.sh"
+printf '#!/usr/bin/env bash\nexit 127\n' > "$SANDBOX/scripts/lookup_prod_manifest.sh"
+RUN_OUT=$(cd "$SANDBOX" && env -i PATH="$SANDBOX/bin:/usr/bin:/bin" \
+  DBT_CALL_LOG="$DBT_CALL_LOG" ARTIFACT_DIR="$SANDBOX/diff_reports" \
+  DBT_GCP_PROJECT_CI=ciproj DBT_BQ_DATASET=ci_ds DBT_ARTIFACTS_BUCKET=fake-bucket \
+  HAS_MODEL_CHANGES=true "$BASH" "$SANDBOX/scripts/pr_data_diff.sh" 2>&1); RC=$?
+[[ $RC -ne 0 ]] && pass "exits non-zero on unexpected lookup exit code" || fail "exits non-zero on unexpected lookup exit code (exit $RC)"
+assert_not_contains "$(cat "$DBT_CALL_LOG" 2>/dev/null)" "ls" "never selects models after an unexpected lookup exit code"
 # model_a is deployed; model_b is not, though a leftover prod table may share its name.
 PROD_MANIFEST='{"nodes": {"model.proj.model_a": {"name": "model_a", "resource_type": "model"}, "test.proj.model_b_check": {"name": "model_b", "resource_type": "test"}}}'
 diff_call() { grep "run-operation dev_prod_diff_for_model" "$DBT_CALL_LOG" | grep "model_name: '$1'"; }
 
-echo "scenario 4: a model missing from the prod manifest is diffed as new (#12)"
+echo "scenario 6: a model missing from the prod manifest is diffed as new (#12)"
 WITH_MANIFEST=1 MANIFEST_JSON="$PROD_MANIFEST" run_case 'HAS_MODEL_CHANGES=true DIFF_SELECT=model_a+'
 assert_contains "$(diff_call model_b)" "new_model: true" "model_b (not in manifest) is passed as new"
 assert_not_contains "$(diff_call model_a)" "new_model: true" "model_a (in manifest) is compared as usual"
 assert_contains "$RUN_OUT" "model_b is not in the prod manifest" "says why model_b is treated as new"
 
-echo "scenario 5: an unreadable prod manifest falls back to the table check (#12)"
+echo "scenario 7: an unreadable prod manifest falls back to the table check (#12)"
 WITH_MANIFEST=1 MANIFEST_JSON='not json' run_case 'HAS_MODEL_CHANGES=true DIFF_SELECT=model_a+'
 assert_not_contains "$(cat "$DBT_CALL_LOG")" "new_model: true" "no model forced new"
 assert_contains "$RUN_OUT" "Could not read model names" "warns that the manifest was unreadable"
 
-echo "scenario 6: no prod manifest keeps the table check (#12)"
+echo "scenario 8: no prod manifest keeps the table check (#12)"
 run_case 'HAS_MODEL_CHANGES=true'
 assert_not_contains "$(cat "$DBT_CALL_LOG")" "new_model: true" "no model forced new"
 
@@ -75,7 +96,7 @@ assert_not_contains "$(cat "$DBT_CALL_LOG")" "new_model: true" "no model forced 
 # so the manifest side must be built the same way or every versioned model is "new".
 VERSIONED_MANIFEST='{"nodes": {"model.proj.dim_v": {"name": "dim_v", "resource_type": "model", "version": 2}, "model.proj.model_a": {"name": "model_a", "resource_type": "model", "version": null}}}'
 
-echo "scenario 7: a deployed versioned model is compared as usual, an undeployed version is new"
+echo "scenario 9: a deployed versioned model is compared as usual, an undeployed version is new"
 WITH_MANIFEST=1 MANIFEST_JSON="$VERSIONED_MANIFEST" run_case 'HAS_MODEL_CHANGES=true DIFF_SELECT=dim_v+ STUB_LS=dim_v.v2,dim_v.v3,model_a'
 assert_not_contains "$(diff_call dim_v.v2)" "new_model: true" "dim_v.v2 (in manifest) is compared as usual"
 assert_contains "$(diff_call dim_v.v3)" "new_model: true" "dim_v.v3 (not in manifest) is passed as new"

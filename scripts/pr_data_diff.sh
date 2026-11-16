@@ -24,7 +24,16 @@ echo "=== Data Diff State Detection ==="
 echo "Checking for production manifest for model selection..."
 if [[ -n "${DBT_ARTIFACTS_BUCKET:-}" && ! -f prod_state/manifest.json ]]; then
   mkdir -p prod_state
-  if gsutil ls "gs://${DBT_ARTIFACTS_BUCKET}/prod/manifest.json" >/dev/null 2>&1; then
+  # A lookup error (or any exit code other than 0/2) fails here too; only a
+  # missing manifest (exit 2) means "diff all models" (#74).
+  manifest_lookup=0
+  bash "$(dirname "$0")/lookup_prod_manifest.sh" "gs://${DBT_ARTIFACTS_BUCKET}/prod/manifest.json" \
+    || manifest_lookup=$?
+  if [[ ${manifest_lookup} -ne 0 && ${manifest_lookup} -ne 2 ]]; then
+    echo "✗ Could not check for the production manifest"
+    exit 1
+  fi
+  if [[ ${manifest_lookup} -eq 0 ]]; then
     gsutil cp "gs://${DBT_ARTIFACTS_BUCKET}/prod/manifest.json" prod_state/manifest.json
     echo "✓ Pulled prod manifest for state selection"
   else
