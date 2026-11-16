@@ -120,6 +120,8 @@ echo "scenario: release.yml schedules with SCHED_CRON, not a hard-coded cron (#6
 rel=$(cat "$REPO_ROOT/.github/workflows/release.yml")
 assert_not_contains "$rel" '--schedule "0 6 * * *"' "no hard-coded cron in release.yml"
 assert_contains "$rel" 'secrets.SCHED_CRON' "release.yml reads SCHED_CRON"
+assert_contains "$rel" 'SCHED_CRON: ${{ secrets.SCHED_CRON }}' "passes SCHED_CRON via env:"
+assert_not_contains "$rel" '"${{ secrets.SCHED_CRON }}"' "doesn't inline the secret into the script"
 
 echo "scenario: sandbox PATH hides host docker/gcloud/gh"
 make_sandbox 30-deploy-cloud-run-job.sh no-docker
