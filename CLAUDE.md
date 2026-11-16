@@ -52,6 +52,7 @@ pre-commit run --hook-stage manual --all-files  # Direct pre-commit invocation
 
 yamllint runs automatically on every commit for `models/**/*.yml` files.
 SQLFluff config is in `.sqlfluff` — max line length 120, bigquery dialect, dbt templater.
+The hooks go through `scripts/sqlfluff_hook.sh`, which runs `dbt deps` first when `dbt_packages/` is missing or older than `packages.yml` (the dbt templater can't compile without it).
 
 ## Architecture
 

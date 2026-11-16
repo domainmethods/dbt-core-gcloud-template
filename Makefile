@@ -27,6 +27,9 @@ test-scripts:
 	bash scripts/tests/test_get_changed_models.sh
 	bash scripts/tests/test_ci_build.sh
 	bash scripts/tests/test_upsert_pr_comment.sh
+	bash scripts/tests/test_lookup_prod_manifest.sh
+	bash scripts/tests/test_ci_workflow.sh
+	bash scripts/tests/test_entrypoint.sh
 
 lint:
 	pre-commit run --hook-stage manual --all-files
