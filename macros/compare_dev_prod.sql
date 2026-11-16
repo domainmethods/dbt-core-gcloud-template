@@ -1,10 +1,13 @@
-{% macro dev_prod_diff(table_name, dev_project=None, prod_project=None, dev_dataset_prefix='analytics_', dev_dataset=None, prod_dataset=None, limit=100, execute_query=True) %}
+{% macro dev_prod_diff(table_name, dev_project=None, prod_project=None, dev_dataset_prefix='analytics_', dev_dataset=None, prod_dataset=None, limit=100, execute_query=True, new_model=False) %}
   {#
     Compare a dev table (derived from DBT_USER) vs prod using EXCEPT DISTINCT and counts.
     Usage:
       dbt run-operation dev_prod_diff --args '{"table_name":"fct_example"}'
     Optional args:
       dev_project, prod_project, dev_dataset_prefix, prod_dataset, execute_query (bool)
+      new_model (bool): report as new without checking prod. pr_data_diff.sh sets it for a
+        model missing from the prod manifest, so a leftover prod table with the same name
+        isn't diffed as if it were the model's (#12).
   #}
 
   {% set user = env_var('DBT_USER') %}
@@ -53,8 +56,13 @@
     {% set table_status = 'AUTH_ERROR' %}
 
     {# The run_query will fail if there are auth issues, but script continues due to || true in calling script #}
+    {% if new_model %}
+      {% set table_status = 'NEW_MODEL' %}
+      {% do log('Not in the production manifest; skipping the production table check', info=True) %}
+    {% else %}
     {% set table_check_result = run_query(safe_table_check_sql) %}
-    {% if table_check_result and table_check_result.columns and table_check_result.columns|length > 0 %}
+    {% endif %}
+    {% if not new_model and table_check_result and table_check_result.columns and table_check_result.columns|length > 0 %}
       {% set table_status = table_check_result.columns[0].values()[0] %}
       {% if table_status == 'EXISTS' %}
         {% set prod_table_exists = true %}
@@ -101,13 +109,14 @@
         dev AS (
           SELECT * FROM `{{ _dev_project }}.{{ _dev_dataset }}.{{ table_name }}`
         )
-        SELECT 'in_dev_not_in_prod' AS diff_type, * FROM dev
-        EXCEPT DISTINCT
-        SELECT 'in_dev_not_in_prod' AS diff_type, * FROM prod
+        -- BigQuery needs the parentheses to mix EXCEPT and UNION ALL.
+        (SELECT 'in_dev_not_in_prod' AS diff_type, * FROM dev
+         EXCEPT DISTINCT
+         SELECT 'in_dev_not_in_prod' AS diff_type, * FROM prod)
         UNION ALL
-        SELECT 'in_prod_not_in_dev' AS diff_type, * FROM prod
-        EXCEPT DISTINCT
-        SELECT 'in_prod_not_in_dev' AS diff_type, * FROM dev
+        (SELECT 'in_prod_not_in_dev' AS diff_type, * FROM prod
+         EXCEPT DISTINCT
+         SELECT 'in_prod_not_in_dev' AS diff_type, * FROM dev)
         {% if limit|int > 0 %}
         LIMIT {{ limit|int }}
         {% endif %}
@@ -157,13 +166,14 @@
       dev AS (
         SELECT * FROM `{{ _dev_project }}.{{ _dev_dataset }}.{{ table_name }}`
       )
-      SELECT 'in_dev_not_in_prod' AS diff_type, * FROM dev
-      EXCEPT DISTINCT
-      SELECT 'in_dev_not_in_prod' AS diff_type, * FROM prod
+      -- BigQuery needs the parentheses to mix EXCEPT and UNION ALL.
+      (SELECT 'in_dev_not_in_prod' AS diff_type, * FROM dev
+       EXCEPT DISTINCT
+       SELECT 'in_dev_not_in_prod' AS diff_type, * FROM prod)
       UNION ALL
-      SELECT 'in_prod_not_in_dev' AS diff_type, * FROM prod
-      EXCEPT DISTINCT
-      SELECT 'in_prod_not_in_dev' AS diff_type, * FROM dev
+      (SELECT 'in_prod_not_in_dev' AS diff_type, * FROM prod
+       EXCEPT DISTINCT
+       SELECT 'in_prod_not_in_dev' AS diff_type, * FROM dev)
       {% if limit|int > 0 %}
       LIMIT {{ limit|int }}
       {% endif %}
@@ -173,10 +183,10 @@
 
 {% endmacro %}
 
-{% macro dev_prod_diff_for_model(model_name, dev_project=None, prod_project=None, dev_dataset_prefix='analytics_', dev_dataset=None, prod_dataset=None, limit=100, execute_query=True) %}
+{% macro dev_prod_diff_for_model(model_name, dev_project=None, prod_project=None, dev_dataset_prefix='analytics_', dev_dataset=None, prod_dataset=None, limit=100, execute_query=True, new_model=False) %}
   {# Resolve the relation for the model in the current target to get its identifier #}
   {% set rel = ref(model_name) %}
   {% set identifier = rel.identifier %}
   {% set _dev_project = dev_project or rel.database or target.project %}
-  {% do dev_prod_diff(identifier, dev_project=_dev_project, prod_project=prod_project, dev_dataset_prefix=dev_dataset_prefix, dev_dataset=dev_dataset, prod_dataset=prod_dataset, limit=limit, execute_query=execute_query) %}
+  {% do dev_prod_diff(identifier, dev_project=_dev_project, prod_project=prod_project, dev_dataset_prefix=dev_dataset_prefix, dev_dataset=dev_dataset, prod_dataset=prod_dataset, limit=limit, execute_query=execute_query, new_model=new_model) %}
 {% endmacro %}
