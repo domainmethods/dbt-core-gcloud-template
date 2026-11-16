@@ -850,6 +850,24 @@ Automatic upload on prod runs:
 
 ---
 
+## Packages
+
+Packages are the easiest way to pay for work nobody uses. The template ships only `dbt_utils`, but most projects add connector or analytics packages. `dbt_project.yml` has commented examples for both points below.
+
+**Disable package models nothing reads (#67).** A package builds every model it ships, nightly and in every CI run. Downstream, turning off unread models removed about 48 models from the build, and six of them alone billed hundreds of GiB a week across prod and CI. To find safe candidates:
+
+1. In `target/manifest.json`, use `child_map` to keep only package models with no descendant in your own project.
+2. Check `INFORMATION_SCHEMA.JOBS_BY_PROJECT` for non-dbt queries (BI tools, notebooks) that read them.
+3. Set `+enabled: false` on whole subtrees. Disabling a model that an enabled package model still refs breaks the parse.
+
+**Bound package tests on incremental models (#69).** Only an incremental model's window can change between runs, but its package tests scan the full history every night. Downstream, two such tests went from about 42 GiB a night to about 1.2 GiB once bounded.
+
+* For generic tests, add `+where` under `data_tests:` in `dbt_project.yml`. It pushes through views, so partition pruning still works.
+* Singular tests ignore `where:`. Disable the package copy and add a local copy in `tests/`, with the same SQL bounded to the window and the same severity.
+* `dbt_project.yml` renders before `vars` exist, so the lookback can't come from `var()` there. Hard-code it, with a comment naming the var it mirrors so a grep finds both.
+
+Rule of thumb: write a test at the grain it checks. A test that scans more than about 1 GiB should be bounded, or say in a comment why it can't be.
+
 ## Monitoring
 
 Set up basic monitoring for failures across the stack using log‑based metrics and alerting policies.

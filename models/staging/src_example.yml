@@ -1,12 +1,45 @@
 version: 2
 
+# Freshness bands: calibrate them, don't guess (#66).
+#   - Measure each table's last write over 30 days in INFORMATION_SCHEMA.JOBS_BY_PROJECT
+#     (see README "When to run").
+#   - warn_after: above the worst healthy age at the time the check runs.
+#   - error_after: above "one load missed".
+#   Example: a daily load checked about 2h after it lands is 26h old at worst, so 26h/50h.
+#   Bands are relative to when the check runs: re-check them after moving SCHED_CRON.
+#   `warn` results are only logged. Nothing pages on them unless an alert matches them.
+
 # sources:
 #   - name: raw
 #     schema: "{{ env_var('DBT_RAW_DATASET', 'raw') }}"
 #     tables:
+#       # Timestamp-grain table loaded once a day.
 #       - name: example
 #         config:
 #           freshness:
-#             warn_after: {count: 24, period: hour}
-#             error_after: {count: 72, period: hour}
+#             warn_after: {count: 26, period: hour}
+#             error_after: {count: 50, period: hour}
 #           loaded_at_field: created_at
+#
+#       # Date-grain table (a transfer-service view or a Sheet) with only a date
+#       # column. A healthy one reads 24-48h old depending on when the check runs,
+#       # so its bands sit above 48h.
+#       - name: daily_report
+#         config:
+#           freshness:
+#             warn_after: {count: 49, period: hour}
+#             error_after: {count: 73, period: hour}
+#           loaded_at_field: CAST(_DATA_DATE AS TIMESTAMP)
+#
+#   # Package sources often declare no freshness at all, so their tables are never
+#   # checked until you band them here. `overrides:` names the package; list only the
+#   # tables you want checked.
+#   - name: some_connector
+#     overrides: some_connector_source
+#     tables:
+#       - name: orders
+#         config:
+#           freshness:
+#             warn_after: {count: 26, period: hour}
+#             error_after: {count: 50, period: hour}
+#           loaded_at_field: _loaded_at

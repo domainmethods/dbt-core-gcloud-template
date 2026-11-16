@@ -1,7 +1,17 @@
 version: 2
 models:
   - name: fct_example
-    tests:
-      - not_null:
-          column_name: id
-
+    columns:
+      - name: id
+        data_tests:
+          - not_null
+          - unique
+      - name: bucket
+        data_tests:
+          - accepted_values:
+              # Test inputs go under `arguments:`, test settings under `config:`, side
+              # by side. Confirm the severity dbt resolved in target/manifest.json.
+              arguments:
+                values: ['high', 'regular']
+              config:
+                severity: warn
