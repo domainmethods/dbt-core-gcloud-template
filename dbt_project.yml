@@ -28,3 +28,22 @@ models:
       +materialized: view
     marts:
       +materialized: table
+
+  # Packages build every model they ship, read or not. Disable the ones nothing reads
+  # (#67, README "Packages"). Disable whole subtrees: turning off a model that an
+  # enabled package model refs breaks the parse.
+  # some_package:
+  #   some_package__unused_rollup:
+  #     +enabled: false   # nothing downstream reads it
+
+# Package tests on incremental models scan full history but only the window can
+# change (#69, README "Packages"). Bound generic tests with +where; it pushes through
+# views, so partition pruning still works. dbt_project.yml renders before vars exist,
+# so the window can't come from var() here: hard-code it and name the var it mirrors.
+# data_tests:
+#   some_package:
+#     events:   # folder of the package YAML that defines the test (see its fqn)
+#       unique_some_package__events_event_key:
+#         +where: "event_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)"   # mirrors var lookback_days
+#     some_singular_package_test:
+#       +enabled: false   # singular tests ignore where:; bounded local copy in tests/
