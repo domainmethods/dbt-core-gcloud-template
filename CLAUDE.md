@@ -54,8 +54,8 @@ yamllint runs automatically on every commit for `models/**/*.yml` files.
 
 `scripts/verify_timezone_conventions.py` (CI lint job and `make lint`) enforces the timezone convention:
 UTC `TIMESTAMP`s until the mart layer, converted once there.
-- No zone conversion in `models/staging/` or `models/intermediate/` (`CURRENT_DATE(tz)`/`CURRENT_TIMESTAMP` boundaries are exempt).
-- No `DATETIME(TIMESTAMP(x), tz)` anywhere unless the `DATETIME(` line or the one above has `-- tz-ok: <reason>`. When `x` is already a local `DATETIME`, it is read as UTC and shifted again; dbt, sqlfluff and tests all accept it. Check the input's type, not the syntax.
+- No zone conversion in `models/staging/` or `models/intermediate/`: IANA zone literals, UTC offsets (`'-05:00'`) and Jinja zones (`{{ var('tz') }}`) all count. Only the `CURRENT_DATE(tz)`/`CURRENT_DATETIME(tz)`/`CURRENT_TIMESTAMP` call itself is exempt, not the rest of its line.
+- No `DATETIME(TIMESTAMP(x), tz)` or `DATETIME(CAST(x AS TIMESTAMP), tz)` anywhere unless the `DATETIME(` line or the one above has `-- tz-ok: <reason>`. When `x` is already a local `DATETIME`, it is read as UTC and shifted again; dbt, sqlfluff and tests all accept it. Check the input's type, not the syntax.
 - Configure with `TZ_LINT_ZONES` / `TZ_LINT_LAYERS`. Converted columns get a suffix naming the zone (e.g. `_local`, `_ny`) so readers can tell them from UTC.
 SQLFluff config is in `.sqlfluff` — max line length 120, bigquery dialect, dbt templater.
 
