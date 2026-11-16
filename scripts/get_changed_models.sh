@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Detects which dbt files (models, seeds, snapshots, macros, tests, analyses, config)
+# Detects which dbt files (models, seeds, snapshots, macros, tests, analyses, config,
+# dependencies, profiles)
 # changed in this PR vs origin/main.
 # Outputs (to $GITHUB_ENV/$GITHUB_OUTPUT if available, else stdout):
 #   HAS_MODEL_CHANGES=true|false
@@ -10,6 +11,8 @@ set -euo pipefail
 #   BUILD_SELECT=<same value as DIFF_SELECT>
 #   NEEDS_FALLBACK=true|false  (a change couldn't be scoped by filename; caller
 #                               should fall back to state:modified+)
+#   FULL_BUILD=true|false      (dbt/adapter or profile change: state:modified can't
+#                               see it, so the caller should build everything)
 #
 # Requires: git history (fetch-depth: 0 in checkout)
 
@@ -28,6 +31,7 @@ HAS_MODEL_CHANGES=false
 CHANGED_NODES=""
 MACRO_OR_CONFIG=false
 YAML_CHANGED=false
+FULL_BUILD=false
 
 while IFS= read -r file; do
   [[ -z "$file" ]] && continue
@@ -45,9 +49,16 @@ while IFS= read -r file; do
       HAS_MODEL_CHANGES=true
       YAML_CHANGED=true ;;
     # Singular/generic tests and analyses can't be scoped by filename either.
-    macros/*.sql|tests/*|analyses/*|dbt_project.yml|packages.yml)
+    # package-lock.yml / dependencies.yml move package versions (and their macros),
+    # which state:modified+ picks up through the nodes that use them.
+    macros/*.sql|tests/*|analyses/*|dbt_project.yml|packages.yml|package-lock.yml|dependencies.yml)
       HAS_MODEL_CHANGES=true
       MACRO_OR_CONFIG=true ;;
+    # A dbt-core/adapter bump or profile change alters how every node builds, but the
+    # manifest doesn't change, so state:modified+ selects nothing. Only a full build tests it.
+    requirements.txt|profiles/*)
+      HAS_MODEL_CHANGES=true
+      FULL_BUILD=true ;;
   esac
 done <<< "$CHANGED_FILES"
 
@@ -74,12 +85,14 @@ echo "CHANGED_MODELS=${CHANGED_NODES:-<none>}"
 echo "DIFF_SELECT=${DIFF_SELECT:-<none>}"
 echo "BUILD_SELECT=${BUILD_SELECT:-<none>}"
 echo "NEEDS_FALLBACK=${NEEDS_FALLBACK}"
+echo "FULL_BUILD=${FULL_BUILD}"
 
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   echo "HAS_MODEL_CHANGES=${HAS_MODEL_CHANGES}" >> "$GITHUB_ENV"
   echo "DIFF_SELECT=${DIFF_SELECT}" >> "$GITHUB_ENV"
   echo "BUILD_SELECT=${BUILD_SELECT}" >> "$GITHUB_ENV"
   echo "NEEDS_FALLBACK=${NEEDS_FALLBACK}" >> "$GITHUB_ENV"
+  echo "FULL_BUILD=${FULL_BUILD}" >> "$GITHUB_ENV"
 fi
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   echo "has_model_changes=${HAS_MODEL_CHANGES}" >> "$GITHUB_OUTPUT"
@@ -87,4 +100,5 @@ if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   echo "diff_select=${DIFF_SELECT}" >> "$GITHUB_OUTPUT"
   echo "build_select=${BUILD_SELECT}" >> "$GITHUB_OUTPUT"
   echo "needs_fallback=${NEEDS_FALLBACK}" >> "$GITHUB_OUTPUT"
+  echo "full_build=${FULL_BUILD}" >> "$GITHUB_OUTPUT"
 fi

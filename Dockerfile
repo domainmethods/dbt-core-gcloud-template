@@ -8,7 +8,9 @@ ENV PYTHONPATH=/app
 ENV DBT_PROFILES_DIR=/app/profiles
 
 # Copy core project files needed at runtime
-COPY dbt_project.yml packages.yml requirements.txt ./
+# package-lock.y[m]l: the glob copies the lock when it exists and doesn't fail the build
+# if an adopter deletes it, so the container's `dbt deps` installs the locked versions.
+COPY dbt_project.yml packages.yml package-lock.y[m]l requirements.txt ./
 COPY profiles/ ./profiles/
 COPY macros/ ./macros/
 COPY models/ ./models/

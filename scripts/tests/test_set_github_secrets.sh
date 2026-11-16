@@ -98,5 +98,17 @@ assert_eq "$RUN_RC" "0" "exits 0"
 assert_not_contains "$CALLS" "gh secret delete DBT_DOCS_BUCKET" "keeps DBT_DOCS_BUCKET"
 assert_contains "$RUN_OUT" "Skipping DBT_DOCS_BUCKET (empty)" "says it skipped it"
 
+echo "scenario: every secret is set from a full .env (bash 3.2 safe: no associative array)"
+make_sandbox 'SCHED_CRON="0 7 * * *"'; run_script ''
+assert_eq "$RUN_RC" "0" "exits 0"
+for key in GCP_WIF_PROVIDER GCP_CI_SA_EMAIL GCP_PROJECT_CI DBT_ARTIFACTS_BUCKET DBT_DOCS_BUCKET \
+    GCP_PROD_SA_EMAIL GCP_PROJECT_PROD GCP_SCHEDULER_INVOKER_SA GCP_REGION GCP_SCHED_REGION \
+    SCHED_CRON AR_REPO IMAGE_NAME PROD_DATASET BQ_LOCATION; do
+  assert_contains "$CALLS" "gh secret set $key -R owner/repo" "sets $key"
+done
+assert_contains "$CALLS" "gh secret set GCP_WIF_PROVIDER -R owner/repo --body projects/123/locations/global/workloadIdentityPools/github-pool/providers/github-provider" "WIF provider value"
+assert_contains "$CALLS" "gh secret set SCHED_CRON -R owner/repo --body 0 7 * * *" "cron with spaces kept intact"
+assert_contains "$CALLS" "gh secret set GCP_SCHED_REGION -R owner/repo --body us-central1" "scheduler region defaults to REGION"
+
 echo "results: passed: $PASS_COUNT, failed: $FAIL_COUNT"
 [[ $FAIL_COUNT -eq 0 ]]

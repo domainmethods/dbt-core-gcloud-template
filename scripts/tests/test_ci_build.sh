@@ -148,5 +148,22 @@ printf '#!/usr/bin/env bash\nexit 127\n' > "$SANDBOX10/scripts/lookup_prod_manif
 [[ $RC10 -ne 0 ]] && pass "job fails on unexpected lookup exit code" || fail "job fails on unexpected lookup exit code (exit $RC10)"
 assert_not_contains "$(cat "$DBT_CALL_LOG")" "build" "no full build on unexpected lookup exit code"
 
+echo "scenario: FULL_BUILD (dbt/adapter or profile change) with state → full build, no select, no defer"
+: > "$DBT_CALL_LOG"
+SANDBOX11=$(mktemp -d); mkdir -p "$SANDBOX11/bin"
+printf '#!/usr/bin/env bash\necho "dbt $*" >> "$DBT_CALL_LOG"\n' > "$SANDBOX11/bin/dbt"
+printf '#!/usr/bin/env bash\ncase "$1" in\n  ls) exit 0 ;;\n  cp) mkdir -p prod_state; echo "{}" > prod_state/manifest.json; exit 0 ;;\nesac\n' > "$SANDBOX11/bin/gsutil"
+chmod +x "$SANDBOX11/bin/dbt" "$SANDBOX11/bin/gsutil"
+GITHUB_ENV_FILE11="$SANDBOX11/github_env_11"; : > "$GITHUB_ENV_FILE11"
+( cd "$SANDBOX11" && env -i PATH="$SANDBOX11/bin:/usr/bin:/bin" DBT_CALL_LOG="$DBT_CALL_LOG" \
+    GITHUB_ENV="$GITHUB_ENV_FILE11" DBT_ARTIFACTS_BUCKET="fake-bucket" \
+    HAS_MODEL_CHANGES=true FULL_BUILD=true NEEDS_FALLBACK=true BUILD_SELECT="fct_a+" bash "$SCRIPT" >/dev/null 2>&1 ); RC11=$?
+[[ $RC11 -eq 0 ]] && pass "full build exits 0" || fail "full build exits 0 (exit $RC11)"
+assert_contains "$(cat "$DBT_CALL_LOG")" "build --target ci --exclude-resource-type test" "FULL_BUILD runs an unscoped build"
+assert_not_contains "$(cat "$DBT_CALL_LOG")" "--select" "FULL_BUILD build has no --select"
+assert_not_contains "$(cat "$DBT_CALL_LOG")" "--defer" "FULL_BUILD build does not defer"
+assert_contains "$(cat "$GITHUB_ENV_FILE11")" "CI_SELECT=" "CI_SELECT exported (empty) for full build"
+assert_not_contains "$(cat "$GITHUB_ENV_FILE11")" "CI_SELECT=fct" "CI_SELECT is empty for full build"
+
 echo "results: passed: $PASS_COUNT, failed: $FAIL_COUNT"
 [[ $FAIL_COUNT -eq 0 ]]

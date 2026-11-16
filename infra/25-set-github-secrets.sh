@@ -42,34 +42,14 @@ SCHED_SA_EMAIL="${SCHEDULER_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
 # Use docs bucket as artifacts bucket by default
 ARTIFACTS_BUCKET="${DBT_ARTIFACTS_BUCKET:-${DBT_DOCS_BUCKET}}"
 
-declare -A secrets
-secrets=(
-  [GCP_WIF_PROVIDER]="$WIF_PROVIDER"
-  [GCP_CI_SA_EMAIL]="$CI_SA_EMAIL"
-  [GCP_PROJECT_CI]="$CI_PROJECT_ID"
-  [DBT_ARTIFACTS_BUCKET]="$ARTIFACTS_BUCKET"
-  [DBT_DOCS_BUCKET]="$DBT_DOCS_BUCKET"
-  [GCP_PROD_SA_EMAIL]="$PROD_SA_EMAIL"
-  [GCP_PROJECT_PROD]="$PROD_PROJECT_ID"
-  [GCP_SCHEDULER_INVOKER_SA]="$SCHED_SA_EMAIL"
-  # Deployment coordinates for workflows
-  [GCP_REGION]="$REGION"
-  [GCP_SCHED_REGION]="${SCHED_REGION:-$REGION}"
-  # Nightly cron for release.yml; empty keeps its 06:00 UTC default (#64)
-  [SCHED_CRON]="${SCHED_CRON:-}"
-  [AR_REPO]="$AR_REPO"
-  [IMAGE_NAME]="$IMAGE_NAME"
-  # dbt runtime envs
-  [PROD_DATASET]="$PROD_DATASET"
-  [BQ_LOCATION]="$BQ_LOCATION"
-)
-
 # Optional values: empty in .env means "use the workflow's default", so a secret
 # left over from an earlier run would override it. Delete those instead of skipping.
 OPTIONAL_SECRETS=" SCHED_CRON "
 
-for key in "${!secrets[@]}"; do
-  val="${secrets[$key]}"
+# One call per secret instead of an associative array: `declare -A` needs bash 4,
+# and macOS ships /bin/bash 3.2, which `#!/usr/bin/env bash` picks up by default.
+set_secret() {
+  local key=$1 val=$2 out
   if [[ -z "$val" && "$OPTIONAL_SECRETS" == *" $key "* ]]; then
     if out=$(gh secret delete "$key" -R "$GITHUB_REPO" 2>&1); then
       echo "Deleted secret $key (empty in .env)"
@@ -79,14 +59,33 @@ for key in "${!secrets[@]}"; do
       echo "$out" >&2
       exit 1
     fi
-    continue
+    return 0
   fi
   if [[ -z "$val" ]]; then
     echo "Skipping $key (empty)" >&2
-    continue
+    return 0
   fi
   echo "Setting secret $key"
   gh secret set "$key" -R "$GITHUB_REPO" --body "$val" >/dev/null
-done
+}
+
+set_secret GCP_WIF_PROVIDER "$WIF_PROVIDER"
+set_secret GCP_CI_SA_EMAIL "$CI_SA_EMAIL"
+set_secret GCP_PROJECT_CI "$CI_PROJECT_ID"
+set_secret DBT_ARTIFACTS_BUCKET "$ARTIFACTS_BUCKET"
+set_secret DBT_DOCS_BUCKET "$DBT_DOCS_BUCKET"
+set_secret GCP_PROD_SA_EMAIL "$PROD_SA_EMAIL"
+set_secret GCP_PROJECT_PROD "$PROD_PROJECT_ID"
+set_secret GCP_SCHEDULER_INVOKER_SA "$SCHED_SA_EMAIL"
+# Deployment coordinates for workflows
+set_secret GCP_REGION "$REGION"
+set_secret GCP_SCHED_REGION "${SCHED_REGION:-$REGION}"
+# Nightly cron for release.yml; empty keeps its 06:00 UTC default (#64)
+set_secret SCHED_CRON "${SCHED_CRON:-}"
+set_secret AR_REPO "$AR_REPO"
+set_secret IMAGE_NAME "$IMAGE_NAME"
+# dbt runtime envs
+set_secret PROD_DATASET "$PROD_DATASET"
+set_secret BQ_LOCATION "$BQ_LOCATION"
 
 echo "Done. Verify with: gh secret list -R $GITHUB_REPO"

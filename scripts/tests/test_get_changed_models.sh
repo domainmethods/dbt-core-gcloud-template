@@ -254,6 +254,43 @@ scenario_11() {
   done
 }
 
+scenario_12() {
+  echo "  scenario 12: package-lock.yml / dependencies.yml only -> NEEDS_FALLBACK=true, FULL_BUILD=false"
+  local f
+  for f in "package-lock.yml" "dependencies.yml"; do
+    make_repo
+    commit_files "$f"
+    run_script "$BASE"
+    assert_contains "$RUN_OUT" "HAS_MODEL_CHANGES=true" "a $f change reports HAS_MODEL_CHANGES=true"
+    assert_contains "$RUN_OUT" "NEEDS_FALLBACK=true" "a $f change falls back to state:modified+"
+    assert_contains "$RUN_OUT" "FULL_BUILD=false" "a $f change does not force a full build"
+    cleanup
+  done
+}
+
+scenario_13() {
+  echo "  scenario 13: requirements.txt / profiles/ change -> FULL_BUILD=true (state:modified can't see a dbt bump)"
+  local f
+  for f in "requirements.txt" "profiles/profiles.yml"; do
+    make_repo
+    commit_files "$f"
+    run_script "$BASE"
+    assert_contains "$RUN_OUT" "HAS_MODEL_CHANGES=true" "a $f change reports HAS_MODEL_CHANGES=true"
+    assert_contains "$RUN_OUT" "FULL_BUILD=true" "a $f change forces a full build"
+    assert_contains "$RUN_ENV" "FULL_BUILD=true" "FULL_BUILD is exported to GITHUB_ENV"
+    cleanup
+  done
+}
+
+scenario_14() {
+  echo "  scenario 14: model-only change -> FULL_BUILD=false"
+  make_repo
+  commit_files "models/staging/stg_a.sql"
+  run_script "$BASE"
+  assert_contains "$RUN_OUT" "FULL_BUILD=false" "a model change does not force a full build"
+  cleanup
+}
+
 echo "test_get_changed_models.sh"
 scenario_1
 scenario_2
@@ -266,6 +303,9 @@ scenario_8
 scenario_9
 scenario_10
 scenario_11
+scenario_12
+scenario_13
+scenario_14
 
 echo ""
 echo "passed: $PASS_COUNT  failed: $FAIL_COUNT"
