@@ -51,7 +51,7 @@ while IFS= read -r file; do
     # Singular/generic tests and analyses can't be scoped by filename either.
     # package-lock.yml / dependencies.yml move package versions (and their macros),
     # which state:modified+ picks up through the nodes that use them.
-    macros/*.sql|tests/*|analyses/*|dbt_project.yml|packages.yml|package-lock.yml|dependencies.yml|selectors.yml)
+    macros/*.sql|tests/*|analyses/*|dbt_project.yml|packages.yml|package-lock.yml|dependencies.yml)
       HAS_MODEL_CHANGES=true
       MACRO_OR_CONFIG=true ;;
     # A dbt-core/adapter bump or profile change alters how every node builds, but the

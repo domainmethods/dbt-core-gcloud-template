@@ -255,9 +255,9 @@ scenario_11() {
 }
 
 scenario_12() {
-  echo "  scenario 12: package-lock.yml / dependencies.yml / selectors.yml only -> NEEDS_FALLBACK=true, FULL_BUILD=false"
+  echo "  scenario 12: package-lock.yml / dependencies.yml only -> NEEDS_FALLBACK=true, FULL_BUILD=false"
   local f
-  for f in "package-lock.yml" "dependencies.yml" "selectors.yml"; do
+  for f in "package-lock.yml" "dependencies.yml"; do
     make_repo
     commit_files "$f"
     run_script "$BASE"

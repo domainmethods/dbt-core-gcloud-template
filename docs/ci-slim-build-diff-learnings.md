@@ -30,7 +30,7 @@ positive and how to keep them out of the signal.
   no leading `+`, so ancestors defer). These are **identical**, so build and diff cover the same
   models.
 - `NEEDS_FALLBACK` — true for macro / `dbt_project.yml` / `packages.yml` / `package-lock.yml` /
-  `dependencies.yml` / `selectors.yml` / yaml-only changes that can't be scoped by filename.
+  `dependencies.yml` / yaml-only changes that can't be scoped by filename.
 - `FULL_BUILD` — true for `requirements.txt` or `profiles/` changes. A dbt-core or adapter bump
   leaves the manifest unchanged, so `state:modified+` selects nothing (checked: a 1.10.8 manifest
   vs a 1.10.10 run selects zero nodes); only a full build exercises it.
