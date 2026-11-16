@@ -587,7 +587,7 @@ Note on INT_DATASET:
 Runtime defaults (Cloud Run Job):
 
 * Runs `dbt build` then `dbt source freshness` by default in prod (set `RUN_FRESHNESS=false` to disable, or scope with `FRESHNESS_SELECT`).
-* Uploads `manifest.json`, `run_results.json`, and `sources.json` to `gs://$DBT_ARTIFACTS_BUCKET/prod/`. A failed build or freshness check still uploads `run_results.json` and `sources.json` and then exits non-zero. A failed build keeps the last good `manifest.json`, since CI defers against it.
+* Uploads `manifest.json`, `run_results.json`, and `sources.json` to `gs://$DBT_ARTIFACTS_BUCKET/prod/`. A failed build, freshness check or docs step still uploads `run_results.json` and `sources.json` and then exits non-zero. `manifest.json` is replaced whenever every model, seed and snapshot built, even if data tests failed. The last uploaded one is kept (CI defers against it) when a model, seed or snapshot errored or was skipped, when the build's `run_results.json` is missing, or when `dbt build` exits 2 or higher. The job log says which case applied.
 * Optionally generates docs (`GENERATE_DOCS=true`) and uploads `target/index.html` to `gs://$DBT_DOCS_BUCKET/index.html` (falls back to `DBT_ARTIFACTS_BUCKET` if `DBT_DOCS_BUCKET` is unset).
 
 > Cloud Run **Jobs** are built for batch/ETL: they run to completion and can be executed on a schedule by Cloud Scheduler without standing up servers.

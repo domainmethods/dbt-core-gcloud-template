@@ -102,14 +102,20 @@ DBT_EXIT=0
 python scripts/lib/dbt_summary.py || DBT_EXIT=$?
 
 # Docs only for a green build, so a failed night keeps the last good docs.
+# A docs failure must not stop the artifact upload below, so capture it too.
+DOCS_EXIT=0
 if [[ "${GENERATE_DOCS:-false}" == "true" && "${BUILD_EXIT}" -eq 0 ]]; then
-  dbt ${DBT_NO_COLOR_FLAG} docs generate --static
-  echo "Docs generated at ./target/index.html"
-  # Prefer DBT_DOCS_BUCKET; fall back to DBT_ARTIFACTS_BUCKET if not set
-  EXPORT_DOCS_BUCKET="${DBT_DOCS_BUCKET:-${DBT_ARTIFACTS_BUCKET:-}}"
-  if [[ -n "${EXPORT_DOCS_BUCKET}" ]]; then
-    echo "Uploading docs to gs://${EXPORT_DOCS_BUCKET}/index.html"
-    python scripts/lib/upload_docs.py
+  dbt ${DBT_NO_COLOR_FLAG} docs generate --static || DOCS_EXIT=$?
+  if [[ "${DOCS_EXIT}" -ne 0 ]]; then
+    echo "dbt docs generate failed (exit ${DOCS_EXIT}); skipping docs upload" >&2
+  else
+    echo "Docs generated at ./target/index.html"
+    # Prefer DBT_DOCS_BUCKET; fall back to DBT_ARTIFACTS_BUCKET if not set
+    EXPORT_DOCS_BUCKET="${DBT_DOCS_BUCKET:-${DBT_ARTIFACTS_BUCKET:-}}"
+    if [[ -n "${EXPORT_DOCS_BUCKET}" ]]; then
+      echo "Uploading docs to gs://${EXPORT_DOCS_BUCKET}/index.html"
+      python scripts/lib/upload_docs.py || DOCS_EXIT=$?
+    fi
   fi
 fi
 
@@ -126,9 +132,9 @@ if [[ "${RUN_POST_HOOK:-false}" == "true" && "${BUILD_EXIT}" -eq 0 && "${FRESHNE
 fi
 
 # Propagate the first failure to Cloud Run
-for STEP_EXIT in "${BUILD_EXIT}" "${FRESHNESS_EXIT}" "${DBT_EXIT}"; do
+for STEP_EXIT in "${BUILD_EXIT}" "${FRESHNESS_EXIT}" "${DBT_EXIT}" "${DOCS_EXIT}"; do
   if [[ "${STEP_EXIT}" -ne 0 ]]; then
-    echo "dbt build=${BUILD_EXIT} freshness=${FRESHNESS_EXIT} summary=${DBT_EXIT}; exiting ${STEP_EXIT}" >&2
+    echo "dbt build=${BUILD_EXIT} freshness=${FRESHNESS_EXIT} summary=${DBT_EXIT} docs=${DOCS_EXIT}; exiting ${STEP_EXIT}" >&2
     exit "${STEP_EXIT}"
   fi
 done
