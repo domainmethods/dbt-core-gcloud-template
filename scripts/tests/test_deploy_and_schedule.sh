@@ -90,11 +90,13 @@ for script in 30-deploy-cloud-run-job.sh 80-deploy-docs-viewer.sh; do
   assert_not_contains "$CALLS" "docker build" "skips docker build"
   assert_contains "$CALLS" "builds submit" "builds with Cloud Build"
   assert_contains "$RUN_OUT" "daemon" "says the daemon isn't running"
+  assert_not_contains "$RUN_OUT" "docker not found;" "doesn't claim docker is missing"
 
   echo "scenario: $script, no docker binary → Cloud Build"
   make_sandbox "$script" no-docker; run_script "$script" ''
   assert_eq "$RUN_RC" "0" "exits 0"
   assert_contains "$CALLS" "builds submit" "builds with Cloud Build"
+  assert_contains "$RUN_OUT" "docker not found" "says docker is missing"
 done
 
 echo "scenario: 80-deploy-docs-viewer.sh Cloud Build targets the viewer app (#28)"
