@@ -11,20 +11,27 @@
 # Usage (from .pre-commit-config.yaml): sqlfluff_hook.sh lint|fix [files...]
 set -euo pipefail
 
+# dbt_packages/.deps-ok is written only after `dbt deps` succeeds. A failed
+# run (offline, hub outage, Ctrl-C) can empty dbt_packages/ and still bump its
+# mtime, so comparing against the directory itself would then skip deps forever.
+MARKER=dbt_packages/.deps-ok
+
 needs_deps() {
   [[ -f packages.yml ]] || return 1
-  [[ -d dbt_packages ]] || return 0
+  [[ -f "$MARKER" ]] || return 0
   local f
   for f in packages.yml package-lock.yml; do
-    [[ -f "$f" && "$f" -nt dbt_packages ]] && return 0
+    [[ -f "$f" && "$f" -nt "$MARKER" ]] && return 0
   done
   return 1
 }
 
 if needs_deps; then
   echo "[sqlfluff] dbt_packages/ missing or stale -- running dbt deps" >&2
+  rm -f "$MARKER"
   dbt deps --quiet
-  touch dbt_packages
+  mkdir -p dbt_packages
+  touch "$MARKER"
 fi
 
 exec sqlfluff "$@"
