@@ -4,9 +4,10 @@
 Convention: keep UTC TIMESTAMPs until the mart layer and convert once there.
 
 1. No timezone conversion in the pre-mart layers (default: models/staging,
-   models/intermediate). A line that names a zone fails unless it is a
-   CURRENT_DATE(tz) / CURRENT_TIMESTAMP boundary, which converts "now", not a
-   column.
+   models/intermediate). Any string literal naming a zone fails, except as the
+   sole argument of a CURRENT_DATE / CURRENT_DATETIME / CURRENT_TIME /
+   CURRENT_TIMESTAMP call: that boundary converts "now", not a column. Only the
+   boundary call is exempt; another conversion on the same line still fails.
 2. No `DATETIME(TIMESTAMP(...` anywhere in models/. This is the shape of the
    "double shift": when the inner value is already a local DATETIME, it is read
    as UTC and shifted again, so every row lands hours off. dbt compile, sqlfluff
@@ -39,11 +40,15 @@ import re
 import sys
 from pathlib import Path
 
-NOW_BOUNDARY = re.compile(r"CURRENT_(DATE|TIMESTAMP)", re.IGNORECASE)
+# A zone literal that is the whole argument of CURRENT_DATE(...) and friends is a
+# boundary ("today in New York"), not a column conversion. Matched against the
+# masked code just before / after the literal, so only that call is exempt.
+BOUNDARY_OPEN = re.compile(r"\bCURRENT_(DATE|DATETIME|TIME|TIMESTAMP)\s*\(\s*\Z", re.IGNORECASE)
+BOUNDARY_CLOSE = re.compile(r"\s*\)")
 DOUBLE_SHIFT = re.compile(r"DATETIME\s*\(\s*TIMESTAMP\s*\(", re.IGNORECASE)
 SUPPRESS = re.compile(r"--\s*tz-ok:\s*\S")
-# A quoted IANA name such as 'America/New_York' or "Asia/Kolkata".
-ANY_IANA_ZONE = r"""['"][A-Z][A-Za-z_]+/[A-Za-z_/+-]+['"]"""
+# The contents of a string literal naming an IANA zone, e.g. America/New_York.
+ANY_IANA_ZONE = r"[A-Z][A-Za-z_]+/[A-Za-z_/+-]+"
 
 
 def zone_pattern() -> re.Pattern:
@@ -51,6 +56,11 @@ def zone_pattern() -> re.Pattern:
     if not zones:
         return re.compile(ANY_IANA_ZONE)
     return re.compile("|".join(re.escape(z) for z in zones), re.IGNORECASE)
+
+
+def is_boundary(mask: str, start: int, end: int) -> bool:
+    """True if the literal at mask[start:end] is the sole argument of CURRENT_*()."""
+    return bool(BOUNDARY_OPEN.search(mask, 0, start) and BOUNDARY_CLOSE.match(mask, end))
 
 
 def utc_layers() -> tuple[str, ...]:
@@ -63,14 +73,15 @@ def blank(segment: str) -> str:
     return "".join(ch if ch == "\n" else " " for ch in segment)
 
 
-def scan(text: str) -> tuple[str, str, list[tuple[int, int]]]:
+def scan(text: str) -> tuple[str, str, list[tuple[int, int, str]]]:
     """Separate code, comments and string literals, keeping every offset.
 
     Returns (code, mask, strings):
       code     the text with comments blanked; string literals kept verbatim.
       mask     code with string literals blanked too, for structural matching
                (so 'DATETIME(TIMESTAMP(' inside a string is not code).
-      strings  (start, end) offsets of each string literal's contents.
+      strings  (start, end, contents) of each string literal; start/end
+               include the quotes.
 
     String-literal aware, so '--' or '%/*%' inside a string never starts a
     comment. Handles BigQuery single, double and backtick quotes, triple-quoted
@@ -101,9 +112,10 @@ def scan(text: str) -> tuple[str, str, list[tuple[int, int]]]:
                 else:
                     j += 1
             j = min(j, n)
-            strings.append((i + len(quote), j))
+            contents = text[i + len(quote):j]
             if text.startswith(quote, j):
                 j += len(quote)
+            strings.append((i, j, contents))
             code.append(text[i:j])
             mask.append(blank(text[i:j]))
             i = j
@@ -119,16 +131,23 @@ def scan(text: str) -> tuple[str, str, list[tuple[int, int]]]:
 def check_file(path: Path, rel: str, zone: re.Pattern, layers: tuple[str, ...]) -> list[str]:
     text = path.read_text(encoding="utf-8")
     raw = text.splitlines()
-    code_text, mask, _ = scan(text)
-    code = code_text.split("\n")
+    _, mask, strings = scan(text)
     in_utc_layer = rel.startswith(layers)
     errors = []
 
     def suppressed(n: int) -> bool:
         return bool(SUPPRESS.search(raw[n]) or (n > 0 and SUPPRESS.search(raw[n - 1])))
 
-    for n, line in enumerate(code):
-        if in_utc_layer and zone.search(line) and not NOW_BOUNDARY.search(line) and not suppressed(n):
+    def line_of(offset: int) -> int:
+        return mask.count("\n", 0, offset)
+
+    conversions = set()
+    if in_utc_layer:
+        for start, end, contents in strings:
+            if zone.fullmatch(contents) and not is_boundary(mask, start, end):
+                conversions.add(line_of(start))
+    for n in sorted(conversions):
+        if not suppressed(n):
             errors.append(
                 f"{rel}:{n + 1}: timezone conversion before the mart layer -- keep UTC "
                 f"TIMESTAMPs here and convert once in marts"
@@ -136,7 +155,7 @@ def check_file(path: Path, rel: str, zone: re.Pattern, layers: tuple[str, ...]) 
     # Match the whole file: sqlfluff splits DATETIME(\n TIMESTAMP(x),\n tz) across
     # lines, which a per-line regex never sees.
     for m in DOUBLE_SHIFT.finditer(mask):
-        n = mask.count("\n", 0, m.start())
+        n = line_of(m.start())
         if not suppressed(n):
             errors.append(
                 f"{rel}:{n + 1}: DATETIME(TIMESTAMP(...)) -- the double-shift shape. If the "
