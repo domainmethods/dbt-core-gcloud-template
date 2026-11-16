@@ -134,6 +134,9 @@
       {% set sample = run_query(diffs_sql) %}
       {% do log(sample, info=True) %}
     {% endif %}
+  {% elif new_model %}
+    {# Non-execute mode, model not in the prod manifest: there is no prod table to compare #}
+    {% do log('Not in the production manifest; nothing to compare ' ~ _dev_project ~ '.' ~ _dev_dataset ~ '.' ~ table_name ~ ' against', info=True) %}
   {% else %}
     {# Non-execute mode - just show the SQL #}
     {% do log('-- Table existence check', info=True) %}
