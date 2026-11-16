@@ -30,9 +30,16 @@ RUN_FRESHNESS_FLAG="${RUN_FRESHNESS:-true}"
 
 # Ensure required CLIs are present
 command -v gcloud >/dev/null || { echo "gcloud not found"; exit 1; }
+# Cloud Build when docker is missing or its daemon isn't running (the usual macOS
+# case without Docker Desktop), instead of failing in `docker build` (#28).
 HAVE_DOCKER=1
+NO_DOCKER_REASON=""
 if ! command -v docker >/dev/null 2>&1; then
   HAVE_DOCKER=0
+  NO_DOCKER_REASON="docker not found"
+elif ! docker info >/dev/null 2>&1; then
+  HAVE_DOCKER=0
+  NO_DOCKER_REASON="docker is installed but its daemon isn't running"
 fi
 
 ensure_ar_repo(){
@@ -73,7 +80,7 @@ ensure_image(){
     docker push "$IMAGE_URI"
     popd >/dev/null
   else
-    info "docker not found; using Cloud Build to build and push"
+    info "${NO_DOCKER_REASON}; using Cloud Build to build and push"
     # Ensure Cloud Build API is enabled
     gcloud services enable cloudbuild.googleapis.com --project "$PROJECT_ID" >/dev/null
     # Submit build from repo root
