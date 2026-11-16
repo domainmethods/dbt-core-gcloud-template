@@ -47,7 +47,13 @@ while IFS= read -r name; do
       --role=roles/secretmanager.secretAccessor --project "$PROJECT_ID" >/dev/null
   fi
 
-  if [[ -z "$(gcloud secrets versions list "$name" --filter="state=ENABLED" --limit=1 --format="value(name)" --project "$PROJECT_ID")" ]]; then
+  # Assigned outside [[ ]] so a failed list (e.g. permission denied) stops the
+  # script instead of reading as "no value yet".
+  if ! versions=$(gcloud secrets versions list "$name" --filter="state=ENABLED" --limit=1 --format="value(name)" --project "$PROJECT_ID"); then
+    echo "[error] Could not list versions of secret $name (gcloud error above)." >&2
+    exit 1
+  fi
+  if [[ -z "$versions" ]]; then
     warn "Secret $name has no value yet. The job will fail to start until it has one:"
     warn "  printf '%s' \"\$VALUE\" | gcloud secrets versions add $name --data-file=- --project $PROJECT_ID"
   fi

@@ -46,16 +46,17 @@ case "$1 $2" in
   "secrets create") echo '{}' > "$STUB_DIR/secrets/$3"; exit 0 ;;
   "secrets get-iam-policy") cat "$STUB_DIR/secrets/$3"; exit 0 ;;
   "secrets add-iam-policy-binding") exit 0 ;;
-  "secrets versions") [[ "$3" == list && -f "$STUB_DIR/versions/$4" ]] && echo "projects/test-proj/secrets/$4/versions/1"; exit 0 ;;
+  "secrets versions") [[ "${STUB_VERSIONS_FAIL:-0}" == 1 ]] && { echo "PERMISSION_DENIED: secretmanager.versions.list" >&2; exit 1; }
+    [[ "$3" == list && -f "$STUB_DIR/versions/$4" ]] && echo "projects/test-proj/secrets/$4/versions/1"; exit 0 ;;
 esac
 echo "unexpected gcloud call: $*" >&2; exit 3
 STUB
   chmod +x "$SANDBOX/bin/gcloud"
 }
 
-run_case() {  # $1 = PROD_SECRETS value; sets RUN_OUT, RUN_RC, CALLS
+run_case() {  # $1 = PROD_SECRETS value, $2 = extra env; sets RUN_OUT, RUN_RC, CALLS
   RUN_OUT=$(env -i PATH="$SANDBOX/bin:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin" STUB_DIR="$SANDBOX" \
-    PROD_SECRETS="$1" bash "$SANDBOX/infra/12-secret-manager.sh" 2>&1)
+    PROD_SECRETS="$1" ${2:-} bash "$SANDBOX/infra/12-secret-manager.sh" 2>&1)
   RUN_RC=$?
   CALLS=$(cat "$SANDBOX/calls.log")
 }
@@ -94,6 +95,12 @@ echo "scenario 5: a bad entry stops before any change"
 make_sandbox; run_case 'API_KEY=api-key,oops'
 assert_eq "$RUN_RC" "2" "exits 2"
 assert_eq "$CALLS" "" "no gcloud calls"
+
+echo "scenario 5b: a failing versions list is an error, not \"no value yet\""
+make_sandbox; run_case 'API_KEY=api-key' 'STUB_VERSIONS_FAIL=1'
+assert_eq "$RUN_RC" "1" "exits 1"
+assert_not_contains "$RUN_OUT" "has no value yet" "doesn't claim the secret is empty"
+assert_contains "$RUN_OUT" "PERMISSION_DENIED" "shows gcloud's error"
 
 echo "scenario 6: the script parses under /bin/bash (3.2 on macOS)"
 /bin/bash -n "$REPO_ROOT/infra/12-secret-manager.sh" && /bin/bash -n "$REPO_ROOT/scripts/prod_secrets.sh" \
