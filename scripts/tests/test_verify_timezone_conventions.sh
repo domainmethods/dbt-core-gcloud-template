@@ -357,6 +357,8 @@ scenario_9
 scenario_10
 scenario_11
 scenario_12
+scenario_13
+scenario_14
 
 echo ""
 echo "passed: $PASS_COUNT  failed: $FAIL_COUNT"

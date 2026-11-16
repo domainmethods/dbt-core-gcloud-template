@@ -4,11 +4,16 @@
 Convention: keep UTC TIMESTAMPs until the mart layer and convert once there.
 
 1. No timezone conversion in the pre-mart layers (default: models/staging,
-   models/intermediate). Any string literal naming a zone fails, except as the
-   sole argument of a CURRENT_DATE / CURRENT_DATETIME / CURRENT_TIME /
-   CURRENT_TIMESTAMP call: that boundary converts "now", not a column. Only the
+   models/intermediate). Any string literal naming a zone ('America/New_York',
+   'Etc/GMT+5', '-05:00', '+0530', 'UTC+3') fails, and so does a Jinja
+   expression in a function's zone slot (DATETIME(x, {{ var('tz') }}),
+   FORMAT_TIMESTAMP(f, x, '{{ var("tz") }}'), ... AT TIME ZONE {{ ... }}),
+   since the zone it renders to cannot be seen. The exception is the sole
+   argument of CURRENT_DATE / CURRENT_DATETIME / CURRENT_TIME /
+   CURRENT_TIMESTAMP: that boundary converts "now", not a column. Only the
    boundary call is exempt; another conversion on the same line still fails.
-2. No `DATETIME(TIMESTAMP(...` anywhere in models/. This is the shape of the
+2. No `DATETIME(TIMESTAMP(...` or `DATETIME(CAST(... AS TIMESTAMP)` (or
+   SAFE_CAST) anywhere in models/. This is the shape of the
    "double shift": when the inner value is already a local DATETIME, it is read
    as UTC and shifted again, so every row lands hours off. dbt compile, sqlfluff
    and tests all accept it, and the correct form (inner value a real TIMESTAMP)
@@ -33,6 +38,22 @@ Configuration (environment variables):
 
 No dbt, no warehouse: it reads models/**/*.sql only.
 
+Known limitations (it is a text lint, not a SQL parser; Jinja is not rendered):
+  - Only literals and Jinja expressions are seen. A zone held in a column or
+    SQL variable, or a macro that converts internally ({{ to_local(x) }}), is
+    not caught; nor is a double shift split across CTEs (CAST to TIMESTAMP in
+    one, DATETIME(that_column, tz) in the next).
+  - Jinja zones are caught only as the last argument of DATETIME, TIMESTAMP,
+    DATE, TIME, STRING, TIMESTAMP_TRUNC, FORMAT_TIMESTAMP, PARSE_TIMESTAMP, or
+    after AT TIME ZONE.
+  - The default zone pattern skips bare names ('EST', 'EST5EDT', 'Japan',
+    'UTC') and bare-hour offsets ('-5', '+3'); area names are case-sensitive.
+    List such zones in TZ_LINT_ZONES (which replaces the default entirely).
+  - In a pre-mart layer any zone literal counts, even one that is not used to
+    convert (e.g. 'America/New_York' AS tz_name); mark it `-- tz-ok: <reason>`.
+  - BigQuery `#` comments are not stripped, and `-- tz-ok:` is matched on the
+    raw line, so a marker inside a string literal also counts.
+
 Usage:  python scripts/verify_timezone_conventions.py [repo_root]
 Exits 0 if every check holds, 1 otherwise.
 """
@@ -46,7 +67,23 @@ from pathlib import Path
 # masked code just before / after the literal, so only that call is exempt.
 BOUNDARY_OPEN = re.compile(r"\bCURRENT_(DATE|DATETIME|TIME|TIMESTAMP)\s*\(\s*\Z", re.IGNORECASE)
 BOUNDARY_CLOSE = re.compile(r"\s*\)")
-DOUBLE_SHIFT = re.compile(r"DATETIME\s*\(\s*TIMESTAMP\s*\(", re.IGNORECASE)
+# Double shift: DATETIME( whose first argument is TIMESTAMP(...) or
+# CAST(... AS TIMESTAMP) / SAFE_CAST(... AS TIMESTAMP).
+DATETIME_CALL = re.compile(r"\bDATETIME\s*\(", re.IGNORECASE)
+TIMESTAMP_CALL = re.compile(r"\s*TIMESTAMP\s*\(", re.IGNORECASE)
+CAST_CALL = re.compile(r"\s*(SAFE_)?CAST\s*\(", re.IGNORECASE)
+AS_TIMESTAMP = re.compile(r"\bAS\s+TIMESTAMP\s*\Z", re.IGNORECASE)
+# Functions whose last argument is a zone, with the argument count at which it
+# is. A Jinja expression in that slot ({{ var('tz') }}) hides the zone from the
+# literal check, so it is flagged as a conversion too.
+ZONE_ARG_CALLS = {
+    "DATETIME": 2, "TIMESTAMP": 2, "DATE": 2, "TIME": 2, "STRING": 2,
+    "TIMESTAMP_TRUNC": 3, "FORMAT_TIMESTAMP": 3, "PARSE_TIMESTAMP": 3,
+}
+ZONE_ARG_CALL = re.compile(r"\b(" + "|".join(ZONE_ARG_CALLS) + r")\s*\(", re.IGNORECASE)
+AT_TIME_ZONE = re.compile(r"\bAT\s+TIME\s+ZONE\s+", re.IGNORECASE)
+JINJA_ARG = re.compile(r"""\s*(['"]?)\{\{.*\}\}\1\s*""", re.DOTALL)
+JINJA_START = re.compile(r"""['"]?\{\{""")
 SUPPRESS = re.compile(r"--\s*tz-ok:\s*\S")
 # The contents of a string literal naming an IANA zone, e.g. America/New_York.
 # Only the real tz-database areas (plus the legacy US/, Canada/, ... links) count,
@@ -55,7 +92,10 @@ IANA_AREAS = (
     "Africa|America|Antarctica|Arctic|Asia|Atlantic|Australia|Europe|Indian|Pacific|Etc"
     "|US|Canada|Brazil|Chile|Mexico"
 )
-ANY_IANA_ZONE = rf"(?:{IANA_AREAS})/[A-Za-z_/+-]+"
+# UTC offsets as BigQuery accepts them: '-05:00', '+0530', 'UTC+3', 'GMT-5:30'.
+# A bare '-5' is not matched (too easily a plain value).
+UTC_OFFSET = r"(?:UTC|GMT)[+-]\d{1,2}(?::?\d{2})?|[+-]\d{1,2}:\d{2}|[+-]\d{4}"
+ANY_IANA_ZONE = rf"(?:{IANA_AREAS})/[A-Za-z0-9_/+-]+|{UTC_OFFSET}"
 
 
 def zone_pattern() -> re.Pattern:
@@ -63,6 +103,48 @@ def zone_pattern() -> re.Pattern:
     if not zones:
         return re.compile(ANY_IANA_ZONE)
     return re.compile("|".join(re.escape(z) for z in zones), re.IGNORECASE)
+
+
+def call_args(mask: str, open_paren: int) -> list[tuple[int, int]]:
+    """(start, end) of each top-level argument of the call opened at mask[open_paren]."""
+    args, depth, start = [], 0, open_paren + 1
+    for i in range(open_paren + 1, len(mask)):
+        ch = mask[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return args + [(start, i)]
+            depth -= 1
+        elif ch == "," and depth == 0:
+            args.append((start, i))
+            start = i + 1
+    return args + [(start, len(mask))]
+
+
+def is_double_shift(mask: str, open_paren: int) -> bool:
+    """True if DATETIME('s first argument is TIMESTAMP(...) or CAST(... AS TIMESTAMP)."""
+    start, end = call_args(mask, open_paren)[0]
+    if TIMESTAMP_CALL.match(mask, start, end):
+        return True
+    cast = CAST_CALL.match(mask, start, end)
+    if not cast:
+        return False
+    cast_start, cast_end = call_args(mask, cast.end() - 1)[-1]
+    return bool(AS_TIMESTAMP.search(mask, cast_start, cast_end))
+
+
+def jinja_zone_args(code: str, mask: str) -> list[int]:
+    """Offsets of zone conversions whose zone is a Jinja expression."""
+    found = []
+    for m in ZONE_ARG_CALL.finditer(mask):
+        args = call_args(mask, m.end() - 1)
+        if len(args) == ZONE_ARG_CALLS[m.group(1).upper()] and JINJA_ARG.fullmatch(code, *args[-1]):
+            found.append(m.start())
+    for m in AT_TIME_ZONE.finditer(mask):
+        if JINJA_START.match(code, m.end()):
+            found.append(m.start())
+    return found
 
 
 def is_boundary(mask: str, start: int, end: int) -> bool:
@@ -138,7 +220,7 @@ def scan(text: str) -> tuple[str, str, list[tuple[int, int, str]]]:
 def check_file(path: Path, rel: str, zone: re.Pattern, layers: tuple[str, ...]) -> list[str]:
     text = path.read_text(encoding="utf-8")
     raw = text.splitlines()
-    _, mask, strings = scan(text)
+    code, mask, strings = scan(text)
     in_utc_layer = rel.startswith(layers)
     errors = []
 
@@ -153,6 +235,7 @@ def check_file(path: Path, rel: str, zone: re.Pattern, layers: tuple[str, ...]) 
         for start, end, contents in strings:
             if zone.fullmatch(contents) and not is_boundary(mask, start, end):
                 conversions.add(line_of(start))
+        conversions.update(line_of(offset) for offset in jinja_zone_args(code, mask))
     for n in sorted(conversions):
         if not suppressed(n):
             errors.append(
@@ -161,9 +244,9 @@ def check_file(path: Path, rel: str, zone: re.Pattern, layers: tuple[str, ...]) 
             )
     # Match the whole file: sqlfluff splits DATETIME(\n TIMESTAMP(x),\n tz) across
     # lines, which a per-line regex never sees.
-    for m in DOUBLE_SHIFT.finditer(mask):
+    for m in DATETIME_CALL.finditer(mask):
         n = line_of(m.start())
-        if not suppressed(n):
+        if is_double_shift(mask, m.end() - 1) and not suppressed(n):
             errors.append(
                 f"{rel}:{n + 1}: DATETIME(TIMESTAMP(...)) -- the double-shift shape. If the "
                 f"inner value is a real TIMESTAMP, add `-- tz-ok: <reason>`"
