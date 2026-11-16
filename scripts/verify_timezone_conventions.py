@@ -25,8 +25,9 @@ double-shift text inside a string literal is not mistaken for code.
 
 Configuration (environment variables):
   TZ_LINT_ZONES   comma-separated zone names to treat as a conversion, e.g.
-                  "America/New_York,Europe/London". Default: any quoted IANA
-                  zone ('Area/City').
+                  "America/New_York,Europe/London". Default: any IANA zone in a
+                  real tz-database area (Africa/, America/, ..., Pacific/, Etc/,
+                  and the legacy US/, Canada/, Brazil/, Chile/, Mexico/ links).
   TZ_LINT_LAYERS  comma-separated directories that must stay UTC.
                   Default: "models/staging,models/intermediate".
 
@@ -48,7 +49,13 @@ BOUNDARY_CLOSE = re.compile(r"\s*\)")
 DOUBLE_SHIFT = re.compile(r"DATETIME\s*\(\s*TIMESTAMP\s*\(", re.IGNORECASE)
 SUPPRESS = re.compile(r"--\s*tz-ok:\s*\S")
 # The contents of a string literal naming an IANA zone, e.g. America/New_York.
-ANY_IANA_ZONE = r"[A-Z][A-Za-z_]+/[A-Za-z_/+-]+"
+# Only the real tz-database areas (plus the legacy US/, Canada/, ... links) count,
+# so labels such as 'Yes/No' or 'Credit/Debit' are not mistaken for zones.
+IANA_AREAS = (
+    "Africa|America|Antarctica|Arctic|Asia|Atlantic|Australia|Europe|Indian|Pacific|Etc"
+    "|US|Canada|Brazil|Chile|Mexico"
+)
+ANY_IANA_ZONE = rf"(?:{IANA_AREAS})/[A-Za-z_/+-]+"
 
 
 def zone_pattern() -> re.Pattern:
