@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Tests for infra/90-monitoring.sh: policy create-vs-update, notification channel
-# handling, and the log-metric filters / policy JSON it generates.
-# Dependency-free: bash 4+, coreutils, jq. Stubs gcloud on PATH. No `set -e`.
+# Tests for infra/90-monitoring.sh: policy create / update / skip-if-unchanged,
+# preserving console-set policy fields, notification channel handling, and the
+# log-metric filters / policy JSON it generates.
+# Dependency-free: bash 3.2+, coreutils, jq. Stubs gcloud on PATH. No `set -e`.
 #
 # Usage: bash scripts/tests/test_monitoring.sh
 set -uo pipefail
@@ -16,21 +17,24 @@ assert_not_contains() { [[ "$1" != *"$2"* ]] && pass "$3" || fail "$3 (unexpecte
 assert_eq() { [[ "$1" == "$2" ]] && pass "$3" || fail "$3 (got '$1', want '$2')"; }
 
 # Sandbox layout: $SANDBOX/infra/{90-monitoring.sh,.env}, a gcloud stub on PATH, and
-# state files the stub reads:
-#   policies.txt   "<resource name>|<displayName>" per existing policy
-#   metrics/<name> JSON for each existing log metric
+# state the stub reads and writes:
+#   live/<id>.json  each existing alert policy, as `policies describe` returns it.
+#                   create/update store what they are sent the way the API does:
+#                   conditions get names, records are added, a zero thresholdValue
+#                   is omitted (proto3 JSON), and update replaces the whole policy.
+#   metrics/<name>  JSON for each existing log metric
 # The stub appends every call to calls.log and saves each policy file it is given
 # to policy_files/<n>-<create|update>.json.
 make_sandbox() {
   SANDBOX=$(mktemp -d)
-  mkdir -p "$SANDBOX/bin" "$SANDBOX/infra" "$SANDBOX/metrics" "$SANDBOX/policy_files"
+  mkdir -p "$SANDBOX/bin" "$SANDBOX/infra" "$SANDBOX/metrics" "$SANDBOX/policy_files" "$SANDBOX/live"
   cp "$SCRIPT" "$SANDBOX/infra/90-monitoring.sh"
   cat > "$SANDBOX/infra/.env" <<'ENV'
 PROJECT_ID=test-proj
 REGION=us-central1
 PROD_SA_ID=dbt-prod
 ENV
-  : > "$SANDBOX/policies.txt"; : > "$SANDBOX/calls.log"
+  : > "$SANDBOX/calls.log"
   cat > "$SANDBOX/bin/gcloud" <<'STUB'
 #!/usr/bin/env bash
 echo "gcloud $*" >> "$STUB_DIR/calls.log"
@@ -40,18 +44,33 @@ save_policy() {
   local n; n=$(ls "$STUB_DIR/policy_files" | wc -l | tr -d ' ')
   cp "$(arg_val --policy-from-file)" "$STUB_DIR/policy_files/$(printf '%02d' "$n")-$1.json"
 }
+store_live() {  # $1 = resource name; stores the sent policy as the API would return it
+  local chans; chans=$(arg_val --set-notification-channels)
+  jq --arg n "$1" --arg ch "$chans" '
+    .name = $n
+    | .conditions = [(.conditions // [])[] | .name = ($n + "/conditions/1")
+        | (if .conditionThreshold.thresholdValue == 0 then del(.conditionThreshold.thresholdValue) else . end)]
+    | .creationRecord = {"mutateTime": "2026-01-01T00:00:00Z"}
+    | .mutationRecord = {"mutateTime": "2026-01-02T00:00:00Z"}
+    | (if $ch != "" then .notificationChannels = ($ch | split(",")) else . end)' \
+    "$(arg_val --policy-from-file)" > "$STUB_DIR/live/${1##*/}.json"
+}
 case "$1 $2 $3" in
   "beta monitoring policies")
     case "$4" in
       --help) exit 0 ;;
       list)
         want=$(arg_val --filter); want=${want#displayName=\"}; want=${want%\"}
-        while IFS='|' read -r name display; do
-          [[ "$display" == "$want" ]] && echo "$name"
-        done < "$STUB_DIR/policies.txt"; exit 0 ;;
-      describe) printf '{"name":"%s","notificationChannels":%s}\n' "$5" "${STUB_CUR_CHANNELS:-[]}"; exit 0 ;;
-      create) save_policy create; exit 0 ;;
-      update) save_policy update; exit 0 ;;
+        for f in "$STUB_DIR"/live/*.json; do
+          [[ -f "$f" ]] || continue
+          [[ "$(jq -r .displayName "$f")" == "$want" ]] && jq -r .name "$f"
+        done; exit 0 ;;
+      describe) cat "$STUB_DIR/live/${5##*/}.json"; exit 0 ;;
+      create)
+        save_policy create
+        n=$(ls "$STUB_DIR/live" | wc -l | tr -d ' ')
+        store_live "projects/test-proj/alertPolicies/5$n"; exit 0 ;;
+      update) save_policy update; store_live "$5"; exit 0 ;;
     esac ;;
   "logging metrics describe")
     [[ -f "$STUB_DIR/metrics/$4" ]] && { cat "$STUB_DIR/metrics/$4"; exit 0; }; exit 1 ;;
@@ -62,7 +81,8 @@ STUB
   chmod +x "$SANDBOX/bin/gcloud"
 }
 
-run_case() {  # $1 = extra env assignments; sets RUN_OUT, RUN_RC, CALLS
+run_case() {  # $1 = extra env assignments; sets RUN_OUT, RUN_RC, CALLS (this run only)
+  : > "$SANDBOX/calls.log"
   RUN_OUT=$(env -i PATH="$SANDBOX/bin:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin" STUB_DIR="$SANDBOX" \
     $1 bash "$SANDBOX/infra/90-monitoring.sh" 2>&1)
   RUN_RC=$?
@@ -76,6 +96,13 @@ policy_file() {  # $1 = displayName -> path of the last policy file sent with th
   done
 }
 
+live_file() {  # $1 = displayName -> path of the live policy with that name
+  local f
+  for f in "$SANDBOX"/live/*.json; do
+    [[ "$(jq -r .displayName "$f")" == "$1" ]] && { echo "$f"; return; }
+  done
+}
+
 metric_filter() {  # $1 = log metric name -> the --log-filter it was created with
   grep "logging metrics create $1 " <<<"$CALLS" | sed 's/.*--log-filter=//; s/ --project test-proj$//'
 }
@@ -84,9 +111,16 @@ POLICIES=("Cloud Run Job Errors (dbt-prod-run)" "Cloud Scheduler Job Errors (dbt
   "BigQuery Job Errors (Production)" "Cloud Run Job Failures (dbt-prod-run)" \
   "Cloud Run Job Missing Run (dbt-prod-run)")
 
+# Old-style live policies (no conditions to match the script's), optionally with
+# channels ($1, a JSON array).
 seed_existing_policies() {
   local i=1 p
-  for p in "${POLICIES[@]}"; do echo "projects/test-proj/alertPolicies/10$i|$p" >> "$SANDBOX/policies.txt"; i=$((i + 1)); done
+  for p in "${POLICIES[@]}"; do
+    jq -n --arg n "projects/test-proj/alertPolicies/10$i" --arg d "$p" --argjson ch "${1:-[]}" \
+      '{name: $n, displayName: $d, combiner: "OR", enabled: true, conditions: [], notificationChannels: $ch}' \
+      > "$SANDBOX/live/10$i.json"
+    i=$((i + 1))
+  done
 }
 
 echo "scenario 1: fresh project creates every metric and policy"
@@ -146,21 +180,23 @@ assert_contains "$(jq -c '.conditions[0].conditionThreshold.filter' "$(policy_fi
   "completed_execution_count" "existing failure policy is switched to the execution metric"
 
 echo "scenario 6: re-run without NOTIFICATION_CHANNELS keeps the live policy's channels"
-make_sandbox; seed_existing_policies
-run_case 'STUB_CUR_CHANNELS=["projects/test-proj/notificationChannels/77"]'
+make_sandbox; seed_existing_policies '["projects/test-proj/notificationChannels/77"]'
+run_case ''
 assert_eq "$(jq -c '.notificationChannels' "$(policy_file "BigQuery Job Errors (Production)")")" \
   '["projects/test-proj/notificationChannels/77"]' "update file carries the existing channel"
 assert_not_contains "$CALLS" "set-notification-channels" "does not pass channel flags"
 
 echo "scenario 7: re-run with NOTIFICATION_CHANNELS sets them"
-make_sandbox; seed_existing_policies
+make_sandbox; seed_existing_policies '["projects/test-proj/notificationChannels/77"]'
 run_case 'NOTIFICATION_CHANNELS=projects/test-proj/notificationChannels/9'
-assert_contains "$CALLS" "--set-notification-channels=projects/test-proj/notificationChannels/9" "update sets configured channels"
-assert_not_contains "$CALLS" "policies describe" "no need to read live channels"
+assert_eq "$(jq -c '.notificationChannels' "$(policy_file "BigQuery Job Errors (Production)")")" \
+  '["projects/test-proj/notificationChannels/9"]' "update file carries the configured channels"
+assert_eq "$(jq -c '.notificationChannels' "$(live_file "BigQuery Job Errors (Production)")")" \
+  '["projects/test-proj/notificationChannels/9"]' "live policy ends up with the configured channels"
 
 echo "scenario 8: duplicate display names warn and update one"
 make_sandbox; seed_existing_policies
-echo "projects/test-proj/alertPolicies/999|BigQuery Job Errors (Production)" >> "$SANDBOX/policies.txt"
+jq '.name = "projects/test-proj/alertPolicies/999"' "$SANDBOX/live/103.json" > "$SANDBOX/live/999.json"
 run_case ''
 assert_contains "$RUN_OUT" '2 policies named "BigQuery Job Errors (Production)"' "warns about the duplicate"
 assert_contains "$RUN_OUT" "projects/test-proj/alertPolicies/999" "lists the duplicate's name"
@@ -173,7 +209,51 @@ echo '{"filter":"resource.type=\"cloud_run_job\" severity>=ERROR","description":
 run_case ''
 assert_contains "$CALLS" "logging metrics update cloud_run_job_errors" "updates the drifted metric"
 
-echo "scenario 10: missing-run alert fires when no run summary arrives (#61)"
+echo "scenario 10: update keeps fields set in the console (enabled, severity, labels, strategy, docs)"
+make_sandbox; seed_existing_policies
+for id in 101 103; do
+  jq '.enabled = false | .severity = "WARNING" | .userLabels = {"team": "data"}
+      | .alertStrategy = {"autoClose": "1800s"} | .documentation = {"mimeType": "text/markdown", "content": "console doc"}
+      | .creationRecord = {"mutateTime": "2025-01-01T00:00:00Z"} | .mutationRecord = {"mutateTime": "2025-01-02T00:00:00Z"}' \
+    "$SANDBOX/live/$id.json" > "$SANDBOX/live/$id.tmp" && mv "$SANDBOX/live/$id.tmp" "$SANDBOX/live/$id.json"
+done
+run_case ''
+pf=$(policy_file "Cloud Run Job Errors (dbt-prod-run)")
+assert_eq "$(jq -c '.enabled' "$pf")" "false" "a policy disabled in the console stays disabled"
+assert_eq "$(jq -r '.severity' "$pf")" "WARNING" "keeps severity"
+assert_eq "$(jq -c '.userLabels' "$pf")" '{"team":"data"}' "keeps userLabels"
+assert_eq "$(jq -c '.alertStrategy' "$pf")" '{"autoClose":"1800s"}' "keeps alertStrategy"
+assert_eq "$(jq -r '.documentation.content' "$pf")" "console doc" "keeps console docs when the script sets none"
+assert_eq "$(jq 'has("creationRecord") or has("mutationRecord")' "$pf")" "false" "drops output-only records"
+assert_contains "$(jq -c '.conditions[0].conditionThreshold.filter' "$pf")" "cloud_run_job_errors" "still applies the script's condition"
+pf=$(policy_file "BigQuery Job Errors (Production)")
+assert_eq "$(jq -c '.enabled' "$pf")" "false" "disabled policy with a runbook stays disabled"
+assert_contains "$(jq -r '.documentation.content' "$pf")" "INFORMATION_SCHEMA.JOBS_BY_PROJECT" "the script's runbook replaces console docs"
+
+echo "scenario 11: re-run with nothing changed makes no create or update calls"
+make_sandbox
+run_case ''
+run_case ''
+assert_eq "$RUN_RC" "0" "second run exits 0"
+assert_eq "$(grep -c 'policies create' <<<"$CALLS")" "0" "creates none"
+assert_eq "$(grep -c 'policies update' <<<"$CALLS")" "0" "updates none"
+assert_eq "$(grep -c 'Policy unchanged' <<<"$RUN_OUT")" "5" "reports each policy unchanged"
+run_case 'NOTIFICATION_CHANNELS=projects/test-proj/notificationChannels/9'
+assert_eq "$(grep -c 'policies update' <<<"$CALLS")" "5" "adding channels updates every policy"
+run_case 'NOTIFICATION_CHANNELS=projects/test-proj/notificationChannels/9'
+assert_eq "$(grep -c 'policies update' <<<"$CALLS")" "0" "same channels again: no update"
+run_case ''
+assert_eq "$(grep -c 'policies update' <<<"$CALLS")" "0" "channels unset keeps live ones: no update"
+
+echo "scenario 12: re-run after a condition drifted updates only that policy"
+lf=$(live_file "Cloud Run Job Failures (dbt-prod-run)")
+jq '.conditions[0].conditionThreshold.duration = "600s"' "$lf" > "$lf.tmp" && mv "$lf.tmp" "$lf"
+run_case ''
+assert_eq "$(grep -c 'policies update' <<<"$CALLS")" "1" "updates one policy"
+assert_contains "$RUN_OUT" "Updating policy: Cloud Run Job Failures (dbt-prod-run)" "updates the drifted one"
+assert_eq "$(jq -r '.conditions[0].conditionThreshold.duration' "$lf")" "0s" "drift is reverted"
+
+echo "scenario 13: missing-run alert fires when no run summary arrives (#61)"
 make_sandbox
 run_case ''
 f=$(metric_filter cloud_run_job_dbt_summary_heartbeat)
@@ -194,7 +274,7 @@ assert_contains "$doc" "dbt-prod-nightly" "runbook names the scheduler job"
 assert_contains "$doc" "us-central1" "runbook names the region"
 assert_contains "$doc" "auto-closes" "runbook warns about the incident after a create or update"
 
-echo "scenario 11: MISSING_RUN_DURATION is configurable and capped at 88200s (#61)"
+echo "scenario 14: MISSING_RUN_DURATION is configurable and capped at 88200s (#61)"
 make_sandbox
 run_case 'MISSING_RUN_DURATION=7200s'
 assert_eq "$(jq -r '.conditions[0].conditionThreshold.duration' "$(policy_file "Cloud Run Job Missing Run (dbt-prod-run)")")" "7200s" "custom duration used"

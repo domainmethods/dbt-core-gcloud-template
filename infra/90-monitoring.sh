@@ -165,9 +165,46 @@ $(documentation_json "$doc")
 JSON
 }
 
+# jq helpers for ensure_policy.
+#   merge_live: the live policy ($live) with the fields this script manages taken
+#     from the template (.): displayName, combiner, conditions, documentation when
+#     the template has a runbook, and notificationChannels when $ch is set. Every
+#     other field (enabled, severity, userLabels, alertStrategy, console-written
+#     docs, channels when $ch is unset) is kept as it is live. Output-only records
+#     are dropped.
+#   comparable: a policy minus server-assigned bits (condition names, records) and
+#     default-valued fields the API omits (e.g. a 0 thresholdValue), so a template
+#     and the policy the API echoes back compare equal when nothing changed.
+POLICY_JQ_DEFS='
+def merge_live($live; $ch):
+  . as $t
+  | $live
+  | del(.creationRecord, .mutationRecord, .validity)
+  | .displayName = $t.displayName
+  | .combiner = $t.combiner
+  | .conditions = $t.conditions
+  | (if $t | has("documentation") then .documentation = $t.documentation else . end)
+  | (if $ch != "" then .notificationChannels = [$ch | split(",")[] | gsub("^\\s+|\\s+$"; "")] else . end);
+def prune:
+  if type == "object" then
+    with_entries(.value |= prune | select(.value | . != null and . != "" and . != [] and . != {} and . != 0 and . != false and . != "0s"))
+  elif type == "array" then map(prune)
+  else . end;
+def comparable:
+  del(.creationRecord, .mutationRecord, .validity)
+  | .conditions = [(.conditions // [])[] | del(.name)]
+  | .notificationChannels = ((.notificationChannels // []) | sort)
+  | prune;
+'
+
 # Create the policy, or update it in place if one with this displayName exists, so
 # edits to filters, thresholds or runbooks reach existing deployments on re-run (#54).
-# With NOTIFICATION_CHANNELS unset, an update keeps the policy's current channels.
+# `policies update --policy-from-file` replaces the whole policy (its --fields only
+# accepts disabled/notificationChannels), so the update is the live policy with the
+# managed fields swapped in: a policy disabled or edited in the console keeps those
+# settings. With NOTIFICATION_CHANNELS unset, it keeps its current channels. If the
+# result matches the live policy, no update is sent (an update can open a transient
+# incident on some conditions).
 ensure_policy() {
   local name="$1" file="$2"
   local existing count
@@ -179,25 +216,22 @@ ensure_policy() {
   fi
   existing=$(head -n1 <<<"$existing")
   if [[ -n "$existing" ]]; then
+    local live="${file}.live"
+    if ! $POL_CMD describe "$existing" --format=json --project "$PROJECT_ID" > "$live"; then
+      echo "[error] Failed to read monitoring policy: $name ($existing)" >&2
+      return 1
+    fi
+    jq --slurpfile live "$live" --arg ch "$CHANNELS" "$POLICY_JQ_DEFS"' merge_live($live[0]; $ch)' "$file" > "${file}.merged" \
+      && mv "${file}.merged" "$file"
+    if jq -e --slurpfile live "$live" "$POLICY_JQ_DEFS"' (comparable) == ($live[0] | comparable)' "$file" >/dev/null; then
+      echo "Policy unchanged: $name"
+      return 0
+    fi
     echo "Updating policy: $name"
-    if [[ -n "$CHANNELS" ]]; then
-      if ! $POL_CMD update "$existing" --policy-from-file="$file" --set-notification-channels="$CHANNELS" --project "$PROJECT_ID"; then
-        echo "[error] Failed to update monitoring policy: $name" >&2
-        echo "        Check that notification channels are valid and you have monitoring.alertPolicies.update permission" >&2
-        return 1
-      fi
-    else
-      # The policy file carries no channels; keep whatever the live policy has.
-      local cur_channels
-      cur_channels=$($POL_CMD describe "$existing" --format=json --project "$PROJECT_ID" | jq -r '(.notificationChannels // []) | join(",")')
-      if [[ -n "$cur_channels" ]]; then
-        jq --arg c "$cur_channels" '.notificationChannels = ($c | split(","))' "$file" > "${file}.chan" && mv "${file}.chan" "$file"
-      fi
-      if ! $POL_CMD update "$existing" --policy-from-file="$file" --project "$PROJECT_ID"; then
-        echo "[error] Failed to update monitoring policy: $name" >&2
-        echo "        Check that you have monitoring.alertPolicies.update permission" >&2
-        return 1
-      fi
+    if ! $POL_CMD update "$existing" --policy-from-file="$file" --project "$PROJECT_ID"; then
+      echo "[error] Failed to update monitoring policy: $name" >&2
+      echo "        Check that notification channels are valid and you have monitoring.alertPolicies.update permission" >&2
+      return 1
     fi
   else
     echo "Creating policy: $name"
@@ -222,7 +256,9 @@ ensure_policy() {
 # `NOT logName=~"cloudaudit"` keeps this on the job's execution logs. The cloud_run_job
 # resource also emits Cloud Audit logs, so a transient GCP error on the release's
 # `gcloud run jobs update` (logged as ERROR, then retried by gcloud) would otherwise
-# page. Real dbt failures land on run.googleapis.com/stderr and are still counted.
+# page. Only audit logs are dropped: the job's own logs still count at severity>=ERROR
+# (dbt's JSON logs on run.googleapis.com/stdout, anything on run.googleapis.com/stderr,
+# and Cloud Run's task-exit messages on run.googleapis.com/varlog/system).
 ensure_log_metric "cloud_run_job_errors" \
   "resource.type=\"cloud_run_job\" severity>=ERROR resource.labels.location=\"${REGION}\" resource.labels.job_name=\"${JOB_NAME}\" NOT logName=~\"cloudaudit\"" \
   "Errors from Cloud Run Job ${JOB_NAME} (execution logs, severity>=ERROR)"
@@ -259,7 +295,7 @@ ensure_log_metric "cloud_run_job_dbt_summary_heartbeat" \
   "Run summaries with results from Cloud Run Job ${JOB_NAME} (missing-run heartbeat)"
 
 TMP=$(mktemp)
-trap 'rm -f "$TMP" "${TMP}.chan"' EXIT
+trap 'rm -f "$TMP" "${TMP}.live" "${TMP}.merged"' EXIT
 
 # read -d '' (not $(cat <<EOF)) so bash 3.2 parses quotes in the text
 read -r -d '' BIGQUERY_ERRORS_DOC <<'EOF' || true

@@ -871,7 +871,8 @@ Usage
 Notes
 
 * Requires an up‑to‑date `gcloud` with Monitoring alpha/beta commands.
-* Safe to re‑run: existing metrics and policies are updated in place to match the script. With `NOTIFICATION_CHANNELS` unset, a policy keeps the channels it already has.
+* Safe to re‑run: existing metrics and policies are updated in place to match the script, and a policy that already matches is left alone (`Policy unchanged`), so a re-run sends no update.
+* The script owns each policy's name, combiner, conditions and, where it sets one, its runbook (`documentation`). Everything else is read from the live policy and kept: enabled/disabled, severity, user labels, alert strategy (auto-close, notification rate limits) and documentation you wrote in the console on a policy the script gives no runbook. With `NOTIFICATION_CHANNELS` unset, a policy also keeps the channels it already has; set it and the script replaces them. Edits in the console to the script-owned fields are reverted on the next run.
 * Creating or updating the missing-run policy opens one short incident a few minutes after the next run's summary. It closes on its own.
 
 ## Operational Notes
