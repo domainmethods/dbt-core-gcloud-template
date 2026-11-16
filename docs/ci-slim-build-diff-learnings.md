@@ -29,12 +29,16 @@ positive and how to keep them out of the signal.
 - `DIFF_SELECT` / `BUILD_SELECT` — `name+` per changed model/seed/snapshot (model + downstream;
   no leading `+`, so ancestors defer). These are **identical**, so build and diff cover the same
   models.
-- `NEEDS_FALLBACK` — true for macro / `dbt_project.yml` / `packages.yml` / yaml-only changes that
-  can't be scoped by filename.
+- `NEEDS_FALLBACK` — true for macro / `dbt_project.yml` / `packages.yml` / `package-lock.yml` /
+  `dependencies.yml` / `selectors.yml` / yaml-only changes that can't be scoped by filename.
+- `FULL_BUILD` — true for `requirements.txt` or `profiles/` changes. A dbt-core or adapter bump
+  leaves the manifest unchanged, so `state:modified+` selects nothing (checked: a 1.10.8 manifest
+  vs a 1.10.10 run selects zero nodes); only a full build exercises it.
 
 `scripts/ci_build.sh` consumes these: git-diff-scoped build for model changes; a combined
 `"$BUILD_SELECT state:modified+"` tier when a macro/config change accompanies model changes;
-`state:modified+` for macro/config/yaml-only; and a full build only when no prod manifest exists.
+`state:modified+` for macro/config/yaml-only; and a full build when no prod manifest exists or
+`FULL_BUILD` is true.
 
 ## The false-positive classes (and the fix)
 

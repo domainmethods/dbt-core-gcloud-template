@@ -3,8 +3,9 @@ set -euo pipefail
 
 # CI build strategy (git-diff-scoped):
 #   1. No model changes detected                     → dbt parse only (syntax check)
-#   2. No production manifest available               → full build (no --defer; cannot
-#                                                        safely scope without state)
+#   2. No production manifest available, or FULL_BUILD=true (requirements.txt /
+#      profiles/ changed: a dbt or adapter bump that state:modified can't see)
+#                                                     → full build (no --defer)
 #   3. Manifest available, git-diff scope only         → build "$BUILD_SELECT" --defer
 #                                                        (unchanged ancestors defer to prod)
 #   4. Manifest available, macro/config change alongside
@@ -87,7 +88,13 @@ if [[ "${HAS_MODEL_CHANGES:-true}" == "false" ]]; then
   exit 0
 fi
 
-if [[ "${HAS_STATE}" != "true" ]]; then
+if [[ "${FULL_BUILD:-false}" == "true" ]]; then
+  # dbt-core/adapter or profile change: the manifest is unchanged, so state:modified+
+  # would select nothing. Build everything (no defer) to actually exercise the upgrade.
+  echo "Strategy: full build (requirements.txt or profiles/ changed)"
+  dbt build --target ci --exclude-resource-type test
+  CI_SELECT=""; CI_DEFER=""
+elif [[ "${HAS_STATE}" != "true" ]]; then
   # No prod manifest → cannot defer safely → full build.
   echo "No production state available, running full build"
   dbt build --target ci --exclude-resource-type test
