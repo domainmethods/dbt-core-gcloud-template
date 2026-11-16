@@ -58,6 +58,7 @@ UTC `TIMESTAMP`s until the mart layer, converted once there.
 - No `DATETIME(TIMESTAMP(x), tz)` or `DATETIME(CAST(x AS TIMESTAMP), tz)` anywhere unless the `DATETIME(` line or the one above has `-- tz-ok: <reason>`. When `x` is already a local `DATETIME`, it is read as UTC and shifted again; dbt, sqlfluff and tests all accept it. Check the input's type, not the syntax.
 - Configure with `TZ_LINT_ZONES` / `TZ_LINT_LAYERS`. Converted columns get a suffix naming the zone (e.g. `_local`, `_ny`) so readers can tell them from UTC.
 SQLFluff config is in `.sqlfluff` — max line length 120, bigquery dialect, dbt templater.
+The hooks go through `scripts/sqlfluff_hook.sh`, which runs `dbt deps` first when `dbt_packages/` is missing or older than `packages.yml` (the dbt templater can't compile without it).
 
 ## Architecture
 
