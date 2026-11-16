@@ -27,9 +27,17 @@ test-scripts:
 	bash scripts/tests/test_get_changed_models.sh
 	bash scripts/tests/test_ci_build.sh
 	bash scripts/tests/test_monitoring.sh
+	bash scripts/tests/test_deploy_and_schedule.sh
+	bash scripts/tests/test_set_github_secrets.sh
+	bash scripts/tests/test_verify_timezone_conventions.sh
+	bash scripts/tests/test_upsert_pr_comment.sh
+	bash scripts/tests/test_lookup_prod_manifest.sh
+	bash scripts/tests/test_ci_workflow.sh
+	bash scripts/tests/test_entrypoint.sh
 
 lint:
 	pre-commit run --hook-stage manual --all-files
+	python3 scripts/verify_timezone_conventions.py
 
 lint-fix:
 	pre-commit run --hook-stage manual sqlfluff-fix --all-files
