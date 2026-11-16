@@ -60,6 +60,8 @@ secrets=(
   # dbt runtime envs
   [PROD_DATASET]="$PROD_DATASET"
   [BQ_LOCATION]="$BQ_LOCATION"
+  # Secret Manager mappings for release.yml's --set-secrets (#32); names only, no values
+  [PROD_SECRETS]="${PROD_SECRETS:-}"
 )
 
 for key in "${!secrets[@]}"; do

@@ -122,6 +122,13 @@ if [[ -n "${DBT_JOB_EXECUTION_TIMEOUT_SEC:-}" ]]; then
 fi
 ENV_VARS="$(IFS=,; echo "${env_kvs[*]}")"
 
+# Secret Manager secrets as env vars (#32); infra/12-secret-manager.sh sets them up.
+SECRET_ARGS=()
+if [[ -n "${PROD_SECRETS:-}" ]]; then
+  source ../scripts/prod_secrets.sh
+  SECRET_ARGS=(--set-secrets="$(prod_secrets_flag "$PROD_SECRETS")")
+fi
+
 info "Deploying Cloud Run Job 'dbt-prod-run' with image: ${IMAGE_URI}"
 gcloud run jobs deploy dbt-prod-run \
   --image="${IMAGE_URI}" \
@@ -134,6 +141,7 @@ gcloud run jobs deploy dbt-prod-run \
   --memory=2Gi \
   --cpu=1 \
   --set-env-vars="${ENV_VARS}" \
+  ${SECRET_ARGS[@]+"${SECRET_ARGS[@]}"} \
   --project "${PROJECT_ID}"
 
 info "Cloud Run Job deployed."
