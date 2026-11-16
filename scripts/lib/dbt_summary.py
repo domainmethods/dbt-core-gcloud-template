@@ -7,7 +7,8 @@ import json
 import os
 import sys
 
-path = os.path.join("target", "run_results.json")
+# entrypoint.sh points this at the build's copy; later dbt commands rewrite target/.
+path = os.environ.get("DBT_RUN_RESULTS_PATH") or os.path.join("target", "run_results.json")
 try:
     with open(path) as f:
         doc = json.load(f)
