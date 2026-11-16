@@ -105,6 +105,15 @@ const context = (runNumber, runId) => ({ repo: { owner: 'o', repo: 'r' }, issue:
   await upsert({ github: gh, context: context(7, 700), kind: 'dbt-data-diff', body: 'y'.repeat(70000) });
   ok(gh.calls[0][1].body.length <= 65536 && gh.calls[0][1].body.endsWith('*(truncated to fit GitHub)*'), 'oversized current body truncated');
 
+  console.log('  scenario 7: truncation cuts at a line boundary');
+  const rows = Array.from({ length: 3000 }, (_, i) => `| model_${i} | ${'z'.repeat(20)} |`).join('\n');
+  gh = fakeGithub([]);
+  await upsert({ github: gh, context: context(8, 800), kind: 'dbt-data-diff', body: rows });
+  const b7 = gh.calls[0][1].body;
+  const kept = b7.slice(0, b7.indexOf('\n\n*(truncated'));
+  ok(b7.length <= 65536 && b7.endsWith('*(truncated to fit GitHub)*'), 'truncated with a note');
+  ok(kept.endsWith(' |') && rows.includes(kept.slice(kept.indexOf('\n') + 1)), 'no partial table row before the note');
+
   console.log('');
   console.log(`passed: ${pass}  failed: ${fail}`);
   process.exit(fail === 0 ? 0 : 1);

@@ -43,7 +43,12 @@ function render(kind, body, runNumber, runId, previous) {
     }
   }
   if (out.length > MAX_BODY) {
-    out = out.slice(0, MAX_BODY - 40) + '\n\n*(truncated to fit GitHub)*';
+    const note = '\n\n*(truncated to fit GitHub)*';
+    let cut = out.slice(0, MAX_BODY - note.length);
+    // End on a whole line (no half table row), unless that would drop most of it.
+    const nl = cut.lastIndexOf('\n');
+    if (nl > cut.length / 2) cut = cut.slice(0, nl);
+    out = cut + note;
   }
   return out;
 }
