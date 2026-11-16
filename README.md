@@ -678,6 +678,21 @@ Notes:
 ```
 
 * Scheduling Cloud Run **Jobs** can be done directly from the Job’s **Triggers** tab or with API/CLI; the console path is explicit in Google’s docs.
+* **When to run.** `SCHED_CRON` (UTC, default `0 6 * * *`) sets the nightly time for both `40-schedule-prod-job.sh` and `release.yml`, which reads it from the GitHub secret of the same name (`25-set-github-secrets.sh` copies it, and deletes the secret when `SCHED_CRON` is empty). Set it after the last daily source load. A run that starts before the loads finish leaves every mart a day behind, and nothing fails. To find the latest load, check when each source dataset was last written over the past 30 days:
+
+  ```sql
+  SELECT destination_table.dataset_id AS dataset,
+         MAX(EXTRACT(TIME FROM end_time)) AS latest_write_utc
+  FROM `region-REGION`.INFORMATION_SCHEMA.JOBS_BY_PROJECT  -- your BQ_LOCATION, e.g. region-us, region-eu
+  WHERE creation_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+    AND state = 'DONE' AND error_result IS NULL
+    AND destination_table.dataset_id IN ('your_source_dataset_1', 'your_source_dataset_2')
+  GROUP BY dataset
+  ```
+
+  `MAX(EXTRACT(TIME …))` assumes loads finish before midnight UTC: a load that ends at 00:30 reads as earlier than one at 23:00. If yours cross midnight, look at the `end_time` values directly.
+
+  Source freshness is measured at run time. After moving the schedule, re-check the `warn_after` / `error_after` bands.
 
 5. Notification channels (optional helper for alerts):
 
