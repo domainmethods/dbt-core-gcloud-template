@@ -5,7 +5,7 @@ Convention: keep UTC TIMESTAMPs until the mart layer and convert once there.
 
 1. No timezone conversion in the pre-mart layers (default: models/staging,
    models/intermediate). Any string literal naming a zone ('America/New_York',
-   'Etc/GMT+5', '-05:00', '+0530', 'UTC+3') fails, and so does a Jinja
+   'Etc/GMT+5', '-05:00', 'UTC+3') fails, and so does a Jinja
    expression in a function's zone slot (DATETIME(x, {{ var('tz') }}),
    FORMAT_TIMESTAMP(f, x, '{{ var("tz") }}'), ... AT TIME ZONE {{ ... }}),
    since the zone it renders to cannot be seen. The exception is the sole
@@ -92,9 +92,11 @@ IANA_AREAS = (
     "Africa|America|Antarctica|Arctic|Asia|Atlantic|Australia|Europe|Indian|Pacific|Etc"
     "|US|Canada|Brazil|Chile|Mexico"
 )
-# UTC offsets as BigQuery accepts them: '-05:00', '+0530', 'UTC+3', 'GMT-5:30'.
+# UTC offsets as BigQuery accepts them: '-05:00', 'UTC+3', 'GMT-5:30'. A bare
+# '+0530' is not matched: it is indistinguishable from numeric sentinels such as
+# '-9999' or '+1000', which are common in staging and must not fail CI.
 # A bare '-5' is not matched (too easily a plain value).
-UTC_OFFSET = r"(?:UTC|GMT)[+-]\d{1,2}(?::?\d{2})?|[+-]\d{1,2}:\d{2}|[+-]\d{4}"
+UTC_OFFSET = r"(?:UTC|GMT)[+-]\d{1,2}(?::?\d{2})?|[+-]\d{1,2}:\d{2}"
 ANY_IANA_ZONE = rf"(?:{IANA_AREAS})/[A-Za-z0-9_/+-]+|{UTC_OFFSET}"
 
 
@@ -240,7 +242,8 @@ def check_file(path: Path, rel: str, zone: re.Pattern, layers: tuple[str, ...]) 
         if not suppressed(n):
             errors.append(
                 f"{rel}:{n + 1}: timezone conversion before the mart layer -- keep UTC "
-                f"TIMESTAMPs here and convert once in marts"
+                f"TIMESTAMPs here and convert once in marts (if intended, add "
+                f"`-- tz-ok: <reason>`)"
             )
     # Match the whole file: sqlfluff splits DATETIME(\n TIMESTAMP(x),\n tz) across
     # lines, which a per-line regex never sees.

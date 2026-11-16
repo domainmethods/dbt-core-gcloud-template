@@ -269,7 +269,7 @@ SQL
 select datetime(created_at, '-05:00') as x from src
 SQL
   put models/staging/stg_off2.sql <<'SQL'
-select datetime(created_at, '+0530') as x from src
+select nullif(amount_str, '-9999') as amt, nullif(code_str, '+1000') as code from src
 SQL
   put models/staging/stg_off3.sql <<'SQL'
 select datetime(created_at, 'UTC+3') as x from src
@@ -305,7 +305,7 @@ SQL
   assert_contains "$OUT" "stg_etc.sql:1: $STG" "'Etc/GMT+5' flagged"
   assert_contains "$OUT" "stg_ba.sql:1: $STG" "'America/Argentina/Buenos_Aires' flagged"
   assert_contains "$OUT" "stg_off1.sql:1: $STG" "'-05:00' flagged"
-  assert_contains "$OUT" "stg_off2.sql:1: $STG" "'+0530' flagged"
+  assert_not_contains "$OUT" "stg_off2.sql" "numeric sentinels '-9999'/'+1000' not flagged"
   assert_contains "$OUT" "stg_off3.sql:1: $STG" "'UTC+3' flagged"
   assert_contains "$OUT" "stg_legacy.sql:1: $STG" "legacy 'US/Eastern' flagged"
   assert_contains "$OUT" "stg_jinja_quoted.sql:1: $STG" "quoted jinja zone flagged"
