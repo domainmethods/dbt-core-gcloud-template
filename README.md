@@ -457,6 +457,7 @@ Optional helpers (as needed):
 * [infra/85-ensure-notification-channels.sh](#monitoring) — Create/reuse Monitoring email channels; writes NOTIFICATION_CHANNELS.
 * [infra/90-monitoring.sh](#monitoring) — Ensure alerting policies for Run Job, Scheduler, and BigQuery errors.
 * [infra/15-artifacts-lifecycle.sh](#docs--artifacts) — Set GCS lifecycle on artifacts/docs bucket (e.g., delete objects >30 days).
+* [infra/12-secret-manager.sh](#secrets) — Create the Secret Manager secrets in `PROD_SECRETS` and grant the prod SA access to each.
 * [infra/check-operator-iam.sh](#operator-iam-to-run-infra-scripts) — Check current operator’s project roles; helpful before running bootstrap.
 
 Tip: 25/50/70/80/81/85/90/15 are optional and can be run any time after 10 (and when their prerequisites exist).
@@ -734,6 +735,17 @@ source infra/85-ensure-notification-channels.sh
 
 ---
 
+## Secrets
+
+API keys and passwords the models need at run time (for example in `hooks/pre_run.py`) come from Secret Manager, not env vars or the image.
+
+* List them in `infra/.env` as `PROD_SECRETS=API_KEY=api-key,DB_PASS=db-pass`: each entry is the env var the job sees, then the secret's name. Add `:<version>` to pin one; the default is `latest`.
+* `(cd infra && ./12-secret-manager.sh)` creates any missing secret and grants the prod service account `roles/secretmanager.secretAccessor` on each one, not project-wide. It never takes values. Add them yourself, reading the value with `read -rs` so it isn't echoed or saved in shell history: `read -rs VALUE`, then `printf '%s' "$VALUE" | gcloud secrets versions add api-key --data-file=-; unset VALUE`. It warns about any secret that has no value yet, because the job won't start until each one has a value.
+* `infra/25-set-github-secrets.sh` copies `PROD_SECRETS` to GitHub. `release.yml` and `infra/30-deploy-cloud-run-job.sh` then pass it to the job as `--set-secrets`.
+* `--set-secrets` replaces the job's whole list. Taking a secret out of `PROD_SECRETS` unmounts it at the next deploy. Emptying `PROD_SECRETS` leaves the old list in place. To remove them all: empty `PROD_SECRETS`, re-run `infra/25-set-github-secrets.sh` (it deletes the `PROD_SECRETS` GitHub secret, or the next release re-mounts them), then run `gcloud run jobs update dbt-prod-run --clear-secrets`.
+
+---
+
 ## Developer Onboarding
 
 Ensure developers have a per‑dev dataset and the minimal IAM needed to work safely.
@@ -794,6 +806,7 @@ The person/service running scripts in `infra/` needs elevated, temporary permiss
   * `roles/bigquery.admin` (create datasets + set dataset IAM)
   * `roles/run.admin` (create/update Cloud Run Jobs + set IAM)
   * `roles/cloudscheduler.admin` (create/update Scheduler jobs)
+  * `roles/secretmanager.admin` (create secrets + grant the prod SA access; only with `PROD_SECRETS`)
 * On the specific service accounts created by bootstrap:
   * `roles/iam.serviceAccountUser` on the prod runner SA (required to deploy a Run Job with `--service-account`)
   * `roles/iam.serviceAccountUser` on the scheduler invoker SA (if you need to impersonate it during setup)

@@ -62,11 +62,13 @@ secrets=(
   # dbt runtime envs
   [PROD_DATASET]="$PROD_DATASET"
   [BQ_LOCATION]="$BQ_LOCATION"
+  # Secret Manager mappings for release.yml's --set-secrets (#32); names only, no values
+  [PROD_SECRETS]="${PROD_SECRETS:-}"
 )
 
 # Optional values: empty in .env means "use the workflow's default", so a secret
 # left over from an earlier run would override it. Delete those instead of skipping.
-OPTIONAL_SECRETS=" SCHED_CRON "
+OPTIONAL_SECRETS=" SCHED_CRON PROD_SECRETS "
 
 for key in "${!secrets[@]}"; do
   val="${secrets[$key]}"

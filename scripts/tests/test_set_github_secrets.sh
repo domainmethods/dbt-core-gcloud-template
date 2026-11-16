@@ -66,7 +66,7 @@ run_script() {  # $1 = extra env; sets RUN_OUT, RUN_RC, CALLS
 }
 
 # Optional values: empty in .env means "use the default", so the secret must go.
-OPTIONAL_KEYS="SCHED_CRON"
+OPTIONAL_KEYS="SCHED_CRON PROD_SECRETS"
 
 for key in $OPTIONAL_KEYS; do
   echo "scenario: $key set → secret set"

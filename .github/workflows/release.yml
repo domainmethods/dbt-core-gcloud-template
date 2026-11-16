@@ -70,9 +70,13 @@ jobs:
             --set-env-vars "DBT_TARGET=prod,CI=true,DBT_GCP_PROJECT_PROD=${{ secrets.GCP_PROJECT_PROD }},DBT_BQ_DATASET_PROD=${{ secrets.PROD_DATASET }},DBT_BQ_LOCATION=${{ secrets.BQ_LOCATION }},DBT_ARTIFACTS_BUCKET=${{ secrets.DBT_ARTIFACTS_BUCKET }},DBT_DOCS_BUCKET=${{ secrets.DBT_DOCS_BUCKET }},GENERATE_DOCS=true,DBT_PROFILES_DIR=/app/profiles"
             --region "${{ env.REGION }}"
           )
-          # To inject Secret Manager secrets at runtime, add to COMMON_ARGS:
-          #   --set-secrets "API_KEY=api-key-secret:latest,DB_PASS=db-password:latest"
-          # Requires: infra/10-bootstrap.sh grants secretAccessor to the prod SA.
+          # Secret Manager secrets as env vars (#32). PROD_SECRETS is ENV_VAR=secret-name
+          # pairs; infra/12-secret-manager.sh creates them and grants the prod SA access.
+          PROD_SECRETS="${{ secrets.PROD_SECRETS }}"
+          if [[ -n "$PROD_SECRETS" ]]; then
+            source scripts/prod_secrets.sh
+            COMMON_ARGS+=(--set-secrets "$(prod_secrets_flag "$PROD_SECRETS")")
+          fi
           if gcloud run jobs describe "$JOB" --region "${{ env.REGION }}" >/dev/null 2>&1; then
             gcloud run jobs update "$JOB" "${COMMON_ARGS[@]}"
           else

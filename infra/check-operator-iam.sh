@@ -112,6 +112,7 @@ fi
     "roles/bigquery.admin|bigquery.datasets.create|Create BigQuery datasets|${CRM_PROJECT_REF_ID},${CRM_PROJECT_REF_NUM}"
     "roles/run.admin|run.jobs.create|Create Cloud Run Jobs|${RUN_LOC_REF_ID}"
     "roles/cloudscheduler.admin|cloudscheduler.jobs.create|Create Cloud Scheduler jobs|${SCHED_LOC_REF_ID}"
+    "roles/secretmanager.admin|secretmanager.secrets.create|Create Secret Manager secrets (12-secret-manager.sh)|${CRM_PROJECT_REF_ID},${CRM_PROJECT_REF_NUM}"
   )
 
   LAST_TROUBLESHOOT_JSON=""
