@@ -21,6 +21,11 @@ jobs:
           bash scripts/tests/test_pr_data_diff.sh
           bash scripts/tests/test_get_changed_models.sh
           bash scripts/tests/test_ci_build.sh
+          bash scripts/tests/test_verify_timezone_conventions.sh
+      # Timezone conventions (#68): no zone conversion before marts, no DATETIME(TIMESTAMP(x))
+      # double shift without a `-- tz-ok: <reason>`. Reads models/ only; no dbt, no credentials.
+      - name: Check timezone conventions
+        run: python3 scripts/verify_timezone_conventions.py
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'

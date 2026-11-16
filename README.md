@@ -562,6 +562,15 @@ In addition to row/data diffs, the CI pipeline can generate a schema comparison 
 
 > These Slim CI patterns (state selector + deferral) are documented in community engineering posts and case studies. ([Klaviyo Engineering][3], [Medium][2])
 
+**Timezone conventions** (lint job, `scripts/verify_timezone_conventions.py`)
+
+Keep UTC `TIMESTAMP`s until the mart layer and convert once there, into a column whose suffix names the zone (`created_at_local`, `created_at_ny`). The check fails on:
+
+* a zone conversion in `models/staging/` or `models/intermediate/`. `CURRENT_DATE(tz)` / `CURRENT_TIMESTAMP` filter boundaries are exempt.
+* `DATETIME(TIMESTAMP(x), tz)` anywhere in `models/`. When `x` is already a local `DATETIME`, BigQuery reads it as UTC and shifts it again, so every row is hours off, and `dbt compile`, sqlfluff and tests all accept it. When `x` really is a `TIMESTAMP` the expression is right: put `-- tz-ok: <reason>` on the `DATETIME(` line or the line above. A bare `tz-ok:` doesn't count.
+
+Comments are ignored, and the match spans line breaks. Configure with `TZ_LINT_ZONES` (comma-separated zones; default: any quoted IANA zone) and `TZ_LINT_LAYERS` (default `models/staging,models/intermediate`). Run it locally with `make lint`.
+
 Note on INT_DATASET:
 
 * INT_DATASET is optional. If set, the bootstrap script will create a standing non‑prod dataset and grant the CI SA editor on it. If left empty, no integration dataset is created or bound; CI continues to use ephemeral per‑run datasets only. If your CI runs in a different GCP project than the one you bootstrapped, ensure `roles/bigquery.user` is granted to the CI SA in that CI project.

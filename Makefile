@@ -26,9 +26,11 @@ test-scripts:
 	bash scripts/tests/test_pr_data_diff.sh
 	bash scripts/tests/test_get_changed_models.sh
 	bash scripts/tests/test_ci_build.sh
+	bash scripts/tests/test_verify_timezone_conventions.sh
 
 lint:
 	pre-commit run --hook-stage manual --all-files
+	python3 scripts/verify_timezone_conventions.py
 
 lint-fix:
 	pre-commit run --hook-stage manual sqlfluff-fix --all-files
