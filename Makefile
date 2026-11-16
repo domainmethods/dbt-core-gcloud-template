@@ -27,6 +27,7 @@ test-scripts:
 	bash scripts/tests/test_get_changed_models.sh
 	bash scripts/tests/test_ci_build.sh
 	bash scripts/tests/test_deploy_and_schedule.sh
+	bash scripts/tests/test_set_github_secrets.sh
 
 lint:
 	pre-commit run --hook-stage manual --all-files

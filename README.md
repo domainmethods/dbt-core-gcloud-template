@@ -655,7 +655,7 @@ Notes:
 ```
 
 * Scheduling Cloud Run **Jobs** can be done directly from the Job’s **Triggers** tab or with API/CLI; the console path is explicit in Google’s docs.
-* **When to run.** `SCHED_CRON` (UTC, default `0 6 * * *`) sets the nightly time for both `40-schedule-prod-job.sh` and `release.yml`, which reads it from the GitHub secret of the same name (`25-set-github-secrets.sh` copies it). Set it after the last daily source load. A run that starts before the loads finish leaves every mart a day behind, and nothing fails. To find the latest load, check when each source dataset was last written over the past 30 days:
+* **When to run.** `SCHED_CRON` (UTC, default `0 6 * * *`) sets the nightly time for both `40-schedule-prod-job.sh` and `release.yml`, which reads it from the GitHub secret of the same name (`25-set-github-secrets.sh` copies it, and deletes the secret when `SCHED_CRON` is empty). Set it after the last daily source load. A run that starts before the loads finish leaves every mart a day behind, and nothing fails. To find the latest load, check when each source dataset was last written over the past 30 days:
 
   ```sql
   SELECT destination_table.dataset_id AS dataset,
