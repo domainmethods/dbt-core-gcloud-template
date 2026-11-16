@@ -7,16 +7,27 @@
 #   make lint                                           # shortcut via Makefile
 #
 # yamllint runs on every commit (stages: [pre-commit, manual]).
+#
+# The sqlfluff hooks run `dbt deps` themselves when dbt_packages/ is missing or
+# stale (scripts/sqlfluff_hook.sh), so a fresh clone can push without it.
 default_language_version:
   python: python3
 
 repos:
-  - repo: https://github.com/sqlfluff/sqlfluff
-    rev: 3.4.2
+  # Local hooks so scripts/sqlfluff_hook.sh can run `dbt deps` before the dbt
+  # templater compiles the project (#15). Same sqlfluff version and deps as before.
+  - repo: local
     hooks:
       - id: sqlfluff-lint
+        name: sqlfluff-lint
+        language: python
+        # Same entry, types and require_serial as sqlfluff's own hook definition.
+        entry: scripts/sqlfluff_hook.sh lint --processes 0
+        types: [sql]
+        require_serial: true
         additional_dependencies: [
-          "sqlfluff-templater-dbt",
+          "sqlfluff==3.4.2",
+          "sqlfluff-templater-dbt==3.4.2",
           "dbt-core==1.10.8",
           "dbt-bigquery==1.10.1"
         ]
@@ -24,8 +35,14 @@ repos:
         stages: [pre-push, manual]
         files: ^models/.*\.sql$
       - id: sqlfluff-fix
+        name: sqlfluff-fix
+        language: python
+        entry: scripts/sqlfluff_hook.sh fix --show-lint-violations --processes 0
+        types: [sql]
+        require_serial: true
         additional_dependencies: [
-          "sqlfluff-templater-dbt",
+          "sqlfluff==3.4.2",
+          "sqlfluff-templater-dbt==3.4.2",
           "dbt-core==1.10.8",
           "dbt-bigquery==1.10.1"
         ]
