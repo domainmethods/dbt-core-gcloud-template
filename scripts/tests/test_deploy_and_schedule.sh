@@ -59,12 +59,19 @@ exit 0
 STUB
   fi
   chmod +x "$SANDBOX"/bin/*
-  # Only jq from outside: a real docker or gcloud on PATH would mask the stubs.
-  ln -s "$(command -v jq)" "$SANDBOX/bin/jq"
+  # PATH is only $SANDBOX/bin: a host docker, gcloud or gh in /usr/bin would mask
+  # the stubs (and make "no docker binary" find one), so link just the tools the
+  # scripts use.
+  local tool path
+  for tool in $HOST_TOOLS; do
+    path=$(command -v "$tool" 2>/dev/null) || continue
+    ln -s "$path" "$SANDBOX/bin/$tool"
+  done
 }
+HOST_TOOLS="bash env cat dirname basename mktemp rm mkdir cp mv ls jq grep sed awk tr cut head tail sort uniq wc date sleep"
 
 run_script() {  # $1 = script name, $2 = extra env; sets RUN_OUT, RUN_RC, CALLS
-  RUN_OUT=$(env -i PATH="$SANDBOX/bin:/usr/bin:/bin" STUB_DIR="$SANDBOX" \
+  RUN_OUT=$(env -i PATH="$SANDBOX/bin" STUB_DIR="$SANDBOX" \
     HOME="$SANDBOX" $2 bash "$SANDBOX/infra/$1" 2>&1)
   RUN_RC=$?
   CALLS=$(cat "$SANDBOX/calls.log")
@@ -111,6 +118,11 @@ echo "scenario: release.yml schedules with SCHED_CRON, not a hard-coded cron (#6
 rel=$(cat "$REPO_ROOT/.github/workflows/release.yml")
 assert_not_contains "$rel" '--schedule "0 6 * * *"' "no hard-coded cron in release.yml"
 assert_contains "$rel" 'secrets.SCHED_CRON' "release.yml reads SCHED_CRON"
+
+echo "scenario: sandbox PATH hides host docker/gcloud/gh"
+make_sandbox 30-deploy-cloud-run-job.sh no-docker
+leak=$(env -i PATH="$SANDBOX/bin" bash -c 'command -v docker; command -v gh' 2>/dev/null)
+assert_eq "$leak" "" "no docker or gh resolvable in the sandbox"
 
 echo "results: passed: $PASS_COUNT, failed: $FAIL_COUNT"
 [[ $FAIL_COUNT -eq 0 ]]
