@@ -162,6 +162,16 @@ gcloud auth application-default login
 
 > **Why both?** `gcloud auth login` authenticates the gcloud CLI tools (bq, gsutil). `gcloud auth application-default login` creates Application Default Credentials (ADC) that Python libraries like dbt-bigquery use.
 
+> **Only if a source is a Google Sheet (or other Drive file) behind a BigQuery external table:** reading it needs a Drive scope, which the plain logins above don't grant. It's off by default on purpose: most projects never need Drive access. dbt-bigquery already requests the Drive scope (its default `scopes` include `https://www.googleapis.com/auth/drive`), so nothing changes in `profiles/profiles.yml`. What's missing is a token that carries it:
+>
+> ```bash
+> gcloud auth login --enable-gdrive-access   # bq CLI
+> gcloud auth application-default login \
+>   --scopes=https://www.googleapis.com/auth/bigquery,https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/drive.readonly   # dbt
+> ```
+>
+> For CI and prod, share each Sheet (Viewer) with the CI and prod service account emails. Their tokens are not user-scoped, so there's no login step.
+
 #### Step 4: Load Environment
 
 ```bash
@@ -393,6 +403,10 @@ DBT_DOCS_BUCKET=my-company-dbt-docs-$(date +%s)
 2. Verify project access: `gcloud projects describe YOUR_PROJECT_ID`
 3. Ensure dataset exists: `(cd infra && ./50-ensure-dev-datasets.sh)`
 
+#### "Permission denied while getting Drive credentials"
+
+A model reads a Google Sheet external table and your ADC token has no Drive scope. Re-run the `application-default login --scopes=...drive.readonly` command in [Step 3](#step-3-authenticate-with-gcp). If it happens in CI or prod, share the Sheet with that service account.
+
 #### "Dataset not found" error
 
 **Solution:** Create your dev dataset
@@ -442,8 +456,8 @@ Optional helpers (as needed):
 * [infra/81-grant-docs-viewer-access.sh](#docs-viewer-cloud-run-iam-only) — Grant run.invoker to users/groups for the docs viewer.
 * [infra/85-ensure-notification-channels.sh](#monitoring) — Create/reuse Monitoring email channels; writes NOTIFICATION_CHANNELS.
 * [infra/90-monitoring.sh](#monitoring) — Ensure alerting policies for Run Job, Scheduler, and BigQuery errors.
-* [infra/12-secret-manager.sh](#secrets) — Create the Secret Manager secrets in `PROD_SECRETS` and grant the prod SA access to each.
 * [infra/15-artifacts-lifecycle.sh](#docs--artifacts) — Set GCS lifecycle on artifacts/docs bucket (e.g., delete objects >30 days).
+* [infra/12-secret-manager.sh](#secrets) — Create the Secret Manager secrets in `PROD_SECRETS` and grant the prod SA access to each.
 * [infra/check-operator-iam.sh](#operator-iam-to-run-infra-scripts) — Check current operator’s project roles; helpful before running bootstrap.
 
 Tip: 25/50/70/80/81/85/90/15 are optional and can be run any time after 10 (and when their prerequisites exist).
@@ -563,6 +577,15 @@ In addition to row/data diffs, the CI pipeline can generate a schema comparison 
 
 > These Slim CI patterns (state selector + deferral) are documented in community engineering posts and case studies. ([Klaviyo Engineering][3], [Medium][2])
 
+**Timezone conventions** (lint job, `scripts/verify_timezone_conventions.py`)
+
+Keep UTC `TIMESTAMP`s until the mart layer and convert once there, into a column whose suffix names the zone (`created_at_local`, `created_at_ny`). The check fails on:
+
+* a zone conversion in `models/staging/` or `models/intermediate/`: any IANA zone literal (`'America/New_York'`, `'Etc/GMT+5'`), UTC offset (`'-05:00'`, `'UTC+3'`; a bare `'+0530'` is not matched so numeric sentinels like `'-9999'` pass), or a Jinja expression used as the zone (`DATETIME(x, {{ var('tz') }})`). A zone passed to `CURRENT_DATE(tz)` / `CURRENT_DATETIME(tz)` / `CURRENT_TIMESTAMP` is exempt, but only that call, not the rest of its line.
+* `DATETIME(TIMESTAMP(x), tz)` or `DATETIME(CAST(x AS TIMESTAMP), tz)` anywhere in `models/`. When `x` is already a local `DATETIME`, BigQuery reads it as UTC and shifts it again, so every row is hours off, and `dbt compile`, sqlfluff and tests all accept it. When `x` really is a `TIMESTAMP` the expression is right: put `-- tz-ok: <reason>` on the `DATETIME(` line or the line above. A bare `tz-ok:` doesn't count.
+
+Comments are ignored (string literals containing `--` or `/*` are handled), and the match spans line breaks. Configure with `TZ_LINT_ZONES` (comma-separated zones, replacing the default: IANA zones under the real tz-database areas such as `America/` or `Etc/`, plus UTC offsets; so labels like `'Yes/No'` are not flagged) and `TZ_LINT_LAYERS` (default `models/staging,models/intermediate`). Run it locally with `make lint`. It is a text lint, not a parser: a zone held in a column or converted inside a macro is not seen; the script's docstring lists the known limitations.
+
 Note on INT_DATASET:
 
 * INT_DATASET is optional. If set, the bootstrap script will create a standing non‑prod dataset and grant the CI SA editor on it. If left empty, no integration dataset is created or bound; CI continues to use ephemeral per‑run datasets only. If your CI runs in a different GCP project than the one you bootstrapped, ensure `roles/bigquery.user` is granted to the CI SA in that CI project.
@@ -588,7 +611,7 @@ Note on INT_DATASET:
 Runtime defaults (Cloud Run Job):
 
 * Runs `dbt build` then `dbt source freshness` by default in prod (set `RUN_FRESHNESS=false` to disable, or scope with `FRESHNESS_SELECT`).
-* Uploads `manifest.json`, `run_results.json`, and `sources.json` to `gs://$DBT_ARTIFACTS_BUCKET/prod/`.
+* Uploads `manifest.json`, `run_results.json`, and `sources.json` to `gs://$DBT_ARTIFACTS_BUCKET/prod/`. A failed build, freshness check or docs step still uploads `run_results.json` and `sources.json` and then exits non-zero. `manifest.json` is replaced whenever every model, seed and snapshot built, even if data tests failed. The last uploaded one is kept (CI defers against it) when a model, seed or snapshot errored or was skipped, when the build's `run_results.json` is missing, or when `dbt build` exits 2 or higher. The job log says which case applied.
 * Optionally generates docs (`GENERATE_DOCS=true`) and uploads `target/index.html` to `gs://$DBT_DOCS_BUCKET/index.html` (falls back to `DBT_ARTIFACTS_BUCKET` if `DBT_DOCS_BUCKET` is unset).
 
 > Cloud Run **Jobs** are built for batch/ETL: they run to completion and can be executed on a schedule by Cloud Scheduler without standing up servers.
@@ -656,6 +679,21 @@ Notes:
 ```
 
 * Scheduling Cloud Run **Jobs** can be done directly from the Job’s **Triggers** tab or with API/CLI; the console path is explicit in Google’s docs.
+* **When to run.** `SCHED_CRON` (UTC, default `0 6 * * *`) sets the nightly time for both `40-schedule-prod-job.sh` and `release.yml`, which reads it from the GitHub secret of the same name (`25-set-github-secrets.sh` copies it, and deletes the secret when `SCHED_CRON` is empty). Set it after the last daily source load. A run that starts before the loads finish leaves every mart a day behind, and nothing fails. To find the latest load, check when each source dataset was last written over the past 30 days:
+
+  ```sql
+  SELECT destination_table.dataset_id AS dataset,
+         MAX(EXTRACT(TIME FROM end_time)) AS latest_write_utc
+  FROM `region-REGION`.INFORMATION_SCHEMA.JOBS_BY_PROJECT  -- your BQ_LOCATION, e.g. region-us, region-eu
+  WHERE creation_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+    AND state = 'DONE' AND error_result IS NULL
+    AND destination_table.dataset_id IN ('your_source_dataset_1', 'your_source_dataset_2')
+  GROUP BY dataset
+  ```
+
+  `MAX(EXTRACT(TIME …))` assumes loads finish before midnight UTC: a load that ends at 00:30 reads as earlier than one at 23:00. If yours cross midnight, look at the `end_time` values directly.
+
+  Source freshness is measured at run time. After moving the schedule, re-check the `warn_after` / `error_after` bands.
 
 5. Notification channels (optional helper for alerts):
 
@@ -694,6 +732,17 @@ source infra/85-ensure-notification-channels.sh
 * **Scheduler → Cloud Run Job**:
 
   * Give the Scheduler’s SA permission to invoke the job trigger (use the UI “Add Scheduler Trigger” flow to wire this securely).
+
+---
+
+## Secrets
+
+API keys and passwords the models need at run time (for example in `hooks/pre_run.py`) come from Secret Manager, not env vars or the image.
+
+* List them in `infra/.env` as `PROD_SECRETS=API_KEY=api-key,DB_PASS=db-pass`: each entry is the env var the job sees, then the secret's name. Add `:<version>` to pin one; the default is `latest`.
+* `(cd infra && ./12-secret-manager.sh)` creates any missing secret and grants the prod service account `roles/secretmanager.secretAccessor` on each one, not project-wide. It never takes values. Add them yourself, reading the value with `read -rs` so it isn't echoed or saved in shell history: `read -rs VALUE`, then `printf '%s' "$VALUE" | gcloud secrets versions add api-key --data-file=-; unset VALUE`. It warns about any secret that has no value yet, because the job won't start until each one has a value.
+* `infra/25-set-github-secrets.sh` copies `PROD_SECRETS` to GitHub. `release.yml` and `infra/30-deploy-cloud-run-job.sh` then pass it to the job as `--set-secrets`.
+* `--set-secrets` replaces the job's whole list. Taking a secret out of `PROD_SECRETS` unmounts it at the next deploy. Emptying `PROD_SECRETS` leaves the old list in place. To remove them all: empty `PROD_SECRETS`, re-run `infra/25-set-github-secrets.sh` (it deletes the `PROD_SECRETS` GitHub secret, or the next release re-mounts them), then run `gcloud run jobs update dbt-prod-run --clear-secrets`.
 
 ---
 
@@ -851,15 +900,6 @@ Automatic upload on prod runs:
 * If the prod job sets `GENERATE_DOCS=true` and `DBT_DOCS_BUCKET=<bucket>`, the dbt container uploads `target/index.html` to `gs://<bucket>/index.html` automatically after generation.
 
 ---
-
-## Secrets
-
-API keys and passwords the models need at run time (for example in `hooks/pre_run.py`) come from Secret Manager, not env vars or the image.
-
-* List them in `infra/.env` as `PROD_SECRETS=API_KEY=api-key,DB_PASS=db-pass`: each entry is the env var the job sees, then the secret's name. Add `:<version>` to pin one; the default is `latest`.
-* `(cd infra && ./12-secret-manager.sh)` creates any missing secret and grants the prod service account `roles/secretmanager.secretAccessor` on each one, not project-wide. It never takes values. Add them yourself, reading the value with `read -rs` so it isn't echoed or saved in shell history: `read -rs VALUE`, then `printf '%s' "$VALUE" | gcloud secrets versions add api-key --data-file=-; unset VALUE`. It warns about any secret that has no value yet, because the job won't start until each one has a value.
-* `infra/25-set-github-secrets.sh` copies `PROD_SECRETS` to GitHub. `release.yml` and `infra/30-deploy-cloud-run-job.sh` then pass it to the job as `--set-secrets`.
-* `--set-secrets` replaces the job's whole list. Taking a secret out of `PROD_SECRETS` unmounts it at the next deploy. Emptying `PROD_SECRETS` leaves the old list in place. To remove them all: empty `PROD_SECRETS`, re-run `infra/25-set-github-secrets.sh` (it deletes the `PROD_SECRETS` GitHub secret, or the next release re-mounts them), then run `gcloud run jobs update dbt-prod-run --clear-secrets`.
 
 ## Monitoring
 

@@ -28,19 +28,31 @@ if [[ ! -d "$APP_DIR" ]]; then
   echo "Set DOCS_VIEWER_DIR to the app path, or place the app in ./docs-viewer" >&2
   exit 1
 fi
-# Ensure Docker is authenticated for Artifact Registry
-gcloud auth configure-docker "${REGION}-docker.pkg.dev" -q >/dev/null 2>&1 || {
-  echo "[warn] Could not configure Docker auth for Artifact Registry" >&2
-  echo "       You may need to run: gcloud auth configure-docker ${REGION}-docker.pkg.dev" >&2
-}
-if ! docker build -t "$IMAGE_URI" "$APP_DIR"; then
-  echo "[error] Docker build failed for docs viewer" >&2
-  exit 1
-fi
-if ! docker push "$IMAGE_URI"; then
-  echo "[error] Docker push failed for image: ${IMAGE_URI}" >&2
-  echo "        Ensure you have artifactregistry.repositories.uploadArtifacts permission" >&2
-  exit 1
+# Cloud Build when docker is missing or its daemon isn't running, as in
+# 30-deploy-cloud-run-job.sh (#28).
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  # Ensure Docker is authenticated for Artifact Registry
+  gcloud auth configure-docker "${REGION}-docker.pkg.dev" -q >/dev/null 2>&1 || {
+    echo "[warn] Could not configure Docker auth for Artifact Registry" >&2
+    echo "       You may need to run: gcloud auth configure-docker ${REGION}-docker.pkg.dev" >&2
+  }
+  if ! docker build -t "$IMAGE_URI" "$APP_DIR"; then
+    echo "[error] Docker build failed for docs viewer" >&2
+    exit 1
+  fi
+  if ! docker push "$IMAGE_URI"; then
+    echo "[error] Docker push failed for image: ${IMAGE_URI}" >&2
+    echo "        Ensure you have artifactregistry.repositories.uploadArtifacts permission" >&2
+    exit 1
+  fi
+else
+  echo "docker not found or its daemon isn't running; using Cloud Build"
+  gcloud services enable cloudbuild.googleapis.com --project "$PROJECT_ID" >/dev/null
+  if ! gcloud builds submit --region="$REGION" --tag "$IMAGE_URI" --project "$PROJECT_ID" "$APP_DIR"; then
+    echo "[error] Cloud Build failed to build and push image: ${IMAGE_URI}" >&2
+    echo "        Check build logs: gcloud builds log --region=${REGION} --project=${PROJECT_ID}" >&2
+    exit 1
+  fi
 fi
 cd - >/dev/null
 

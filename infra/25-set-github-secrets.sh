@@ -55,6 +55,8 @@ secrets=(
   # Deployment coordinates for workflows
   [GCP_REGION]="$REGION"
   [GCP_SCHED_REGION]="${SCHED_REGION:-$REGION}"
+  # Nightly cron for release.yml; empty keeps its 06:00 UTC default (#64)
+  [SCHED_CRON]="${SCHED_CRON:-}"
   [AR_REPO]="$AR_REPO"
   [IMAGE_NAME]="$IMAGE_NAME"
   # dbt runtime envs
@@ -66,7 +68,7 @@ secrets=(
 
 # Optional values: empty in .env means "use the workflow's default", so a secret
 # left over from an earlier run would override it. Delete those instead of skipping.
-OPTIONAL_SECRETS=" PROD_SECRETS "
+OPTIONAL_SECRETS=" SCHED_CRON PROD_SECRETS "
 
 for key in "${!secrets[@]}"; do
   val="${secrets[$key]}"

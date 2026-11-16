@@ -19,6 +19,8 @@ require_env PROJECT_ID REGION SCHEDULER_SA_ID
 # Use consistent region for scheduler (defaults to same as Cloud Run Job region)
 SCHED_REGION="${SCHED_REGION:-$REGION}"
 SCHED_SA_EMAIL="${SCHEDULER_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+# Cron in UTC. Set it after the last daily source load, or every mart lags a day (#64).
+SCHED_CRON="${SCHED_CRON:-0 6 * * *}"
 
 echo "== Ensure Scheduler SA can invoke the Cloud Run job =="
 TMP_RUN_POLICY="$(mktemp)"
@@ -34,13 +36,13 @@ else
 fi
 rm -f "$TMP_RUN_POLICY"
 
-echo "== Ensure Cloud Scheduler job (runs daily at 06:00 UTC) =="
+echo "== Ensure Cloud Scheduler job (cron \"${SCHED_CRON}\", UTC) =="
 echo "[info] Using Scheduler region: ${SCHED_REGION}, Cloud Run region: ${REGION}"
 
 # Common scheduler args: retry on transient failures
 SCHED_ARGS=(
   --location "${SCHED_REGION}"
-  --schedule="0 6 * * *"
+  --schedule="${SCHED_CRON}"
   --http-method=POST
   --uri="https://run.googleapis.com/v2/projects/${PROJECT_ID}/locations/${REGION}/jobs/dbt-prod-run:run"
   --oauth-service-account-email "${SCHED_SA_EMAIL}"
