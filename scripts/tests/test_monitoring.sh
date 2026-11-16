@@ -273,6 +273,9 @@ assert_contains "$doc" "dbt-prod-run" "runbook names the job"
 assert_contains "$doc" "dbt-prod-nightly" "runbook names the scheduler job"
 assert_contains "$doc" "us-central1" "runbook names the region"
 assert_contains "$doc" "auto-closes" "runbook warns about the incident after a create or update"
+run_case ''
+assert_eq "$(grep -c 'policies update' <<<"$CALLS")" "0" "re-run with no changes sends no update (an update opens an incident)"
+assert_contains "$RUN_OUT" "Policy unchanged: Cloud Run Job Missing Run (dbt-prod-run)" "re-run reports the missing-run policy unchanged"
 
 echo "scenario 14: MISSING_RUN_DURATION is configurable and capped at 88200s (#61)"
 make_sandbox
@@ -283,9 +286,34 @@ run_case 'MISSING_RUN_DURATION=93600s'
 assert_eq "$RUN_RC" "2" "over the API cap exits 2"
 assert_contains "$RUN_OUT" "88200s" "error names the cap"
 assert_not_contains "$CALLS" "create" "fails before changing anything"
+for d in 26h 0s 600s 3599s 3630s 1.5h 90000s; do
+  make_sandbox
+  run_case "MISSING_RUN_DURATION=$d"
+  assert_eq "$RUN_RC" "2" "MISSING_RUN_DURATION=$d is rejected"
+  assert_not_contains "$CALLS" "policies create" "MISSING_RUN_DURATION=$d fails before creating policies"
+done
+for d in 3600s 88200s; do
+  make_sandbox
+  run_case "MISSING_RUN_DURATION=$d"
+  assert_eq "$RUN_RC" "0" "MISSING_RUN_DURATION=$d is accepted"
+done
+
+echo "scenario 15: MISSING_RUN_ALERT=false opts out (jobs that skip days)"
 make_sandbox
-run_case 'MISSING_RUN_DURATION=26h'
-assert_eq "$RUN_RC" "2" "a non-seconds value exits 2"
+run_case 'MISSING_RUN_ALERT=false'
+assert_eq "$RUN_RC" "0" "script exits 0"
+assert_eq "$(grep -c 'policies create' <<<"$CALLS")" "4" "creates the other 4 policies"
+assert_eq "$(policy_file "Cloud Run Job Missing Run (dbt-prod-run)")" "" "no missing-run policy is sent"
+assert_contains "$RUN_OUT" "Missing-run alert disabled" "says it is skipped"
+make_sandbox
+run_case ''
+run_case 'MISSING_RUN_ALERT=false'
+assert_contains "$RUN_OUT" "[warn] Missing-run alert disabled, but policy" "warns that an existing missing-run policy is still active"
+assert_not_contains "$CALLS" "policies update" "leaves the existing policy untouched"
+assert_not_contains "$CALLS" "policies delete" "does not delete it"
+make_sandbox
+run_case 'MISSING_RUN_ALERT=no'
+assert_eq "$RUN_RC" "2" "a value other than true/false exits 2"
 
 echo "results: passed: $PASS_COUNT, failed: $FAIL_COUNT"
 [[ $FAIL_COUNT -eq 0 ]]

@@ -10,11 +10,20 @@ SCHED_REGION=${SCHED_REGION:-$REGION}
 JOB_NAME=${JOB_NAME:-dbt-prod-run}
 SCHED_JOB_NAME=${SCHED_JOB_NAME:-dbt-prod-nightly}
 CHANNELS=${NOTIFICATION_CHANNELS:-}
-# How long without a run summary before the missing-run alert opens (#61). The API
-# rejects threshold durations above 24h30m, so a daily job can't wait longer than that.
+# Missing-run alert (#61). It assumes the job runs at least once a day: the API caps
+# threshold durations at 24h30m (88200s), so a schedule with a gap longer than that
+# (e.g. weekdays only) would page on every gap. Set MISSING_RUN_ALERT=false for those.
+MISSING_RUN_ALERT=${MISSING_RUN_ALERT:-true}
+if [[ "$MISSING_RUN_ALERT" != "true" && "$MISSING_RUN_ALERT" != "false" ]]; then
+  echo "[error] MISSING_RUN_ALERT=$MISSING_RUN_ALERT: use true or false" >&2
+  exit 2
+fi
+# How long without a run summary before it opens: whole seconds, a multiple of 60, at
+# least the policy's 3600s alignment period and at most the API's 88200s cap.
 MISSING_RUN_DURATION=${MISSING_RUN_DURATION:-88200s}
-if [[ ! "$MISSING_RUN_DURATION" =~ ^[0-9]+s$ ]] || (( ${MISSING_RUN_DURATION%s} > 88200 )); then
-  echo "[error] MISSING_RUN_DURATION=$MISSING_RUN_DURATION: use seconds, at most 88200s (the API's 24h30m cap)" >&2
+if [[ ! "$MISSING_RUN_DURATION" =~ ^[0-9]+s$ ]] \
+  || (( 10#${MISSING_RUN_DURATION%s} < 3600 || 10#${MISSING_RUN_DURATION%s} > 88200 || 10#${MISSING_RUN_DURATION%s} % 60 != 0 )); then
+  echo "[error] MISSING_RUN_DURATION=$MISSING_RUN_DURATION: use whole seconds, a multiple of 60, from 3600s to 88200s (the API's 24h30m cap)" >&2
   exit 2
 fi
 
@@ -341,7 +350,20 @@ execution_failure_policy_json "Cloud Run Job Failures (${JOB_NAME})" "$JOB_NAME"
 ensure_policy "Cloud Run Job Failures (${JOB_NAME})" "$TMP"
 
 # Alert when no run has produced results for MISSING_RUN_DURATION (#61)
-missing_run_policy_json "Cloud Run Job Missing Run (${JOB_NAME})" "$MISSING_RUN_DURATION" "$MISSING_RUN_DOC" > "$TMP"
-ensure_policy "Cloud Run Job Missing Run (${JOB_NAME})" "$TMP"
+MISSING_RUN_POLICY="Cloud Run Job Missing Run (${JOB_NAME})"
+if [[ "$MISSING_RUN_ALERT" == "true" ]]; then
+  missing_run_policy_json "$MISSING_RUN_POLICY" "$MISSING_RUN_DURATION" "$MISSING_RUN_DOC" > "$TMP"
+  ensure_policy "$MISSING_RUN_POLICY" "$TMP"
+else
+  echo "Missing-run alert disabled (MISSING_RUN_ALERT=false); skipping policy: $MISSING_RUN_POLICY"
+  # Left alone rather than deleted; say so, since it will keep paging on skipped days.
+  stale=$($POL_CMD list --filter="displayName=\"$MISSING_RUN_POLICY\"" --format="value(name)" --project "$PROJECT_ID")
+  if [[ -n "$stale" ]]; then
+    echo "[warn] Missing-run alert disabled, but policy \"$MISSING_RUN_POLICY\" still exists and will keep firing." >&2
+    echo "$stale" | while read -r p; do
+      echo "       Delete it: $POL_CMD delete $p --project $PROJECT_ID" >&2
+    done
+  fi
+fi
 
 echo "Monitoring alerts ensured."
