@@ -911,8 +911,8 @@ Rule of thumb: write a test at the grain it checks. A test that scans more than 
 
 Set up basic monitoring for failures across the stack using log‑based metrics and alerting policies.
 
-* Metrics: `cloud_run_job_errors`, `cloud_run_job_failures` (text match), `cloud_scheduler_job_errors`, `bigquery_job_errors`.
-* Policies: alert when count > 0 over 5 minutes; uses `gcloud beta/alpha monitoring policies`.
+* Metrics: `cloud_run_job_errors` (execution logs; audit logs excluded), `cloud_run_job_failures` (task-level text match, for dashboards), `cloud_scheduler_job_errors`, `bigquery_job_errors` (skips transients dbt retries past).
+* Policies: alert when count > 0 over 5 minutes; uses `gcloud beta/alpha monitoring policies`. The job failure policy uses the built-in `run.googleapis.com/job/completed_execution_count` (`result="failed"`), so it fires only when a whole execution fails after task retries.
 * Channels: optional but recommended via `infra/85-ensure-notification-channels.sh` (sets `NOTIFICATION_CHANNELS`).
 
 Usage
@@ -928,7 +928,8 @@ Usage
 Notes
 
 * Requires an up‑to‑date `gcloud` with Monitoring alpha/beta commands.
-* Safe to re‑run; existing metrics/policies are left in place.
+* Safe to re‑run: existing metrics and policies are updated in place to match the script, and a policy that already matches is left alone (`Policy unchanged`), so a re-run sends no update.
+* The script owns each policy's name, combiner, conditions and, where it sets one, its runbook (`documentation`). Everything else is read from the live policy and kept: enabled/disabled, severity, user labels, alert strategy (auto-close, notification rate limits) and documentation you wrote in the console on a policy the script gives no runbook. With `NOTIFICATION_CHANNELS` unset, a policy also keeps the channels it already has; set it and the script replaces them. Edits in the console to the script-owned fields are reverted on the next run.
 
 ## Operational Notes
 
