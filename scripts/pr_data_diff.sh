@@ -24,7 +24,16 @@ echo "=== Data Diff State Detection ==="
 echo "Checking for production manifest for model selection..."
 if [[ -n "${DBT_ARTIFACTS_BUCKET:-}" && ! -f prod_state/manifest.json ]]; then
   mkdir -p prod_state
-  if gsutil ls "gs://${DBT_ARTIFACTS_BUCKET}/prod/manifest.json" >/dev/null 2>&1; then
+  # A lookup error (or any exit code other than 0/2) fails here too; only a
+  # missing manifest (exit 2) means "diff all models" (#74).
+  manifest_lookup=0
+  bash "$(dirname "$0")/lookup_prod_manifest.sh" "gs://${DBT_ARTIFACTS_BUCKET}/prod/manifest.json" \
+    || manifest_lookup=$?
+  if [[ ${manifest_lookup} -ne 0 && ${manifest_lookup} -ne 2 ]]; then
+    echo "✗ Could not check for the production manifest"
+    exit 1
+  fi
+  if [[ ${manifest_lookup} -eq 0 ]]; then
     gsutil cp "gs://${DBT_ARTIFACTS_BUCKET}/prod/manifest.json" prod_state/manifest.json
     echo "✓ Pulled prod manifest for state selection"
   else
@@ -57,6 +66,24 @@ if (( ${#MODELS[@]} == 0 )); then
   exit 0
 fi
 
+# A model missing from the prod manifest is new, even if a leftover prod table shares
+# its name; the macro's INFORMATION_SCHEMA check alone would diff it against that
+# table (#12). With no readable manifest, the macro's table check decides.
+# Names match `dbt ls --output name`, which prints a versioned model as "<name>.v<version>".
+PROD_MODEL_NAMES=""
+if [[ -f prod_state/manifest.json ]]; then
+  PROD_MODEL_NAMES="${ARTIFACT_DIR}/.prod_model_names"
+  if ! python3 -c 'import json, sys
+nodes = json.load(open(sys.argv[1])).get("nodes", {})
+def ls_name(n):
+    return n["name"] if n.get("version") is None else n["name"] + ".v" + str(n["version"])
+print("\n".join(sorted({ls_name(n) for n in nodes.values() if n.get("resource_type") == "model"})))' \
+      prod_state/manifest.json > "$PROD_MODEL_NAMES" 2>/dev/null; then
+    echo "⚠ Could not read model names from prod_state/manifest.json; using the prod table check"
+    PROD_MODEL_NAMES=""
+  fi
+fi
+
 echo ""
 echo "=== Running Data Diffs ==="
 echo "Diffing ${#MODELS[@]} model(s) with limit=${DIFF_LIMIT}"
@@ -67,9 +94,14 @@ for m in "${MODELS[@]}"; do
   echo "== ${m} ==" | tee "$out"
   # Produce and print results. We pass the CI dataset explicitly.
   # Capture both stdout and stderr to ensure we get SUMMARY lines
+  new_model=false
+  if [[ -n "$PROD_MODEL_NAMES" ]] && ! grep -Fxq "$m" "$PROD_MODEL_NAMES"; then
+    echo "${m} is not in the prod manifest; diffing it as a new model"
+    new_model=true
+  fi
   echo "Running dbt operation for ${m}..."
   output=$(dbt run-operation dev_prod_diff_for_model \
-    --args "{model_name: '${m}', dev_project: '${DEV_PROJECT}', prod_project: '${PROD_PROJECT}', dev_dataset: '${DEV_DATASET}', limit: ${DIFF_LIMIT}}" \
+    --args "{model_name: '${m}', dev_project: '${DEV_PROJECT}', prod_project: '${PROD_PROJECT}', dev_dataset: '${DEV_DATASET}', limit: ${DIFF_LIMIT}, new_model: ${new_model}}" \
     2>&1 || true)
 
   # Print output to console

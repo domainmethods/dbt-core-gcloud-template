@@ -216,6 +216,44 @@ scenario_9() {
   cleanup
 }
 
+scenario_10() {
+  echo "  scenario 10: singular test / analysis changed -> HAS_MODEL_CHANGES=true, NEEDS_FALLBACK=true"
+  # A test or analysis file can't be scoped to a model by filename, so the caller
+  # must fall back to state:modified+ (which selects the modified test/analysis node).
+  local f
+  for f in "tests/assert_positive_total.sql" "tests/generic/is_even.sql" "analyses/adhoc.sql"; do
+    make_repo
+    commit_files "$f"
+    run_script "$BASE"
+    assert_contains "$RUN_OUT" "HAS_MODEL_CHANGES=true" "a $f change reports HAS_MODEL_CHANGES=true"
+    assert_not_contains "$RUN_ENV" "BUILD_SELECT=." "a $f-only change exports an empty BUILD_SELECT"
+    assert_contains "$RUN_OUT" "NEEDS_FALLBACK=true" "a $f-only change reports NEEDS_FALLBACK=true"
+    cleanup
+  done
+
+  # Alongside a model change the test still forces the state:modified+ union.
+  make_repo
+  commit_files "tests/assert_positive_total.sql" "models/marts/fct_a.sql"
+  run_script "$BASE"
+  assert_contains "$RUN_OUT" "BUILD_SELECT=fct_a+" "the model is still scoped alongside a singular test change"
+  assert_contains "$RUN_OUT" "NEEDS_FALLBACK=true" "a singular test + model change reports NEEDS_FALLBACK=true"
+  cleanup
+}
+
+scenario_11() {
+  echo "  scenario 11: seeds/*.yml or snapshots/*.yml only -> HAS_MODEL_CHANGES=true, NEEDS_FALLBACK=true"
+  local f
+  for f in "seeds/schema.yml" "snapshots/snapshots.yml"; do
+    make_repo
+    commit_files "$f"
+    run_script "$BASE"
+    assert_contains "$RUN_OUT" "HAS_MODEL_CHANGES=true" "a $f change reports HAS_MODEL_CHANGES=true"
+    assert_not_contains "$RUN_ENV" "BUILD_SELECT=." "a $f-only change exports an empty BUILD_SELECT"
+    assert_contains "$RUN_OUT" "NEEDS_FALLBACK=true" "a $f-only change (no node) reports NEEDS_FALLBACK=true"
+    cleanup
+  done
+}
+
 echo "test_get_changed_models.sh"
 scenario_1
 scenario_2
@@ -226,6 +264,8 @@ scenario_6
 scenario_7
 scenario_8
 scenario_9
+scenario_10
+scenario_11
 
 echo ""
 echo "passed: $PASS_COUNT  failed: $FAIL_COUNT"
