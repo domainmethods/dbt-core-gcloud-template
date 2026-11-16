@@ -757,6 +757,7 @@ The person/service running scripts in `infra/` needs elevated, temporary permiss
   * `roles/bigquery.admin` (create datasets + set dataset IAM)
   * `roles/run.admin` (create/update Cloud Run Jobs + set IAM)
   * `roles/cloudscheduler.admin` (create/update Scheduler jobs)
+  * `roles/secretmanager.admin` (create secrets + grant the prod SA access; only with `PROD_SECRETS`)
 * On the specific service accounts created by bootstrap:
   * `roles/iam.serviceAccountUser` on the prod runner SA (required to deploy a Run Job with `--service-account`)
   * `roles/iam.serviceAccountUser` on the scheduler invoker SA (if you need to impersonate it during setup)

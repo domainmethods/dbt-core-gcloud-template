@@ -153,6 +153,10 @@ assert_eq "$RUN_RC" "0" "exits 0"
 assert_contains "$CALLS" "run jobs deploy" "deploys"
 assert_not_contains "$CALLS" "--set-secrets" "no --set-secrets"
 
+echo "scenario 5e: check-operator-iam.sh checks the role 12-secret-manager.sh needs"
+assert_contains "$(cat "$REPO_ROOT/infra/check-operator-iam.sh")" \
+  '"roles/secretmanager.admin|secretmanager.secrets.create|' "checks roles/secretmanager.admin"
+
 echo "scenario 6: the script parses under /bin/bash (3.2 on macOS)"
 /bin/bash -n "$REPO_ROOT/infra/12-secret-manager.sh" && /bin/bash -n "$REPO_ROOT/scripts/prod_secrets.sh" \
   && pass "bash -n clean" || fail "bash -n failed"
