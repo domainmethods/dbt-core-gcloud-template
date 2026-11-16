@@ -103,6 +103,56 @@ assert_eq "$RUN_RC" "1" "exits 1"
 assert_not_contains "$RUN_OUT" "has no value yet" "doesn't claim the secret is empty"
 assert_contains "$RUN_OUT" "PERMISSION_DENIED" "shows gcloud's error"
 
+# 30-deploy sandbox: gcloud stub reports the image tag as present, so nothing is
+# built; PATH holds only the stub and linked tools, so no host docker or gcloud runs.
+make_deploy_sandbox() {  # $1 = PROD_SECRETS value
+  SANDBOX=$(mktemp -d)
+  mkdir -p "$SANDBOX/bin" "$SANDBOX/infra" "$SANDBOX/scripts"
+  cp "$REPO_ROOT/infra/30-deploy-cloud-run-job.sh" "$SANDBOX/infra/"
+  cp "$REPO_ROOT/scripts/prod_secrets.sh" "$SANDBOX/scripts/"
+  cat > "$SANDBOX/infra/.env" <<ENV
+PROJECT_ID=test-proj
+REGION=us-central1
+AR_REPO=dbt
+IMAGE_NAME=dbt
+IMAGE_TAG=v1
+PROD_SA_ID=dbt-prod
+PROD_DATASET=analytics
+BQ_LOCATION=US
+PROD_SECRETS=$1
+ENV
+  : > "$SANDBOX/calls.log"
+  cat > "$SANDBOX/bin/gcloud" <<'STUB'
+#!/usr/bin/env bash
+echo "gcloud $*" >> "$STUB_DIR/calls.log"
+case "$*" in "artifacts docker tags list"*) echo v1 ;; esac
+exit 0
+STUB
+  chmod +x "$SANDBOX/bin/gcloud"
+  local tool path
+  for tool in bash env cat dirname mktemp rm grep sed tr; do
+    path=$(command -v "$tool" 2>/dev/null) || continue
+    ln -s "$path" "$SANDBOX/bin/$tool"
+  done
+}
+run_deploy() {
+  RUN_OUT=$(env -i PATH="$SANDBOX/bin" STUB_DIR="$SANDBOX" HOME="$SANDBOX" \
+    bash "$SANDBOX/infra/30-deploy-cloud-run-job.sh" 2>&1)
+  RUN_RC=$?
+  CALLS=$(cat "$SANDBOX/calls.log")
+}
+
+echo "scenario 5c: 30-deploy mounts PROD_SECRETS with --set-secrets"
+make_deploy_sandbox 'API_KEY=api-key'; run_deploy
+assert_eq "$RUN_RC" "0" "exits 0"
+assert_contains "$(grep 'run jobs deploy' <<<"$CALLS")" "--set-secrets=API_KEY=api-key:latest" "passes --set-secrets"
+
+echo "scenario 5d: 30-deploy without PROD_SECRETS passes no --set-secrets"
+make_deploy_sandbox ''; run_deploy
+assert_eq "$RUN_RC" "0" "exits 0"
+assert_contains "$CALLS" "run jobs deploy" "deploys"
+assert_not_contains "$CALLS" "--set-secrets" "no --set-secrets"
+
 echo "scenario 6: the script parses under /bin/bash (3.2 on macOS)"
 /bin/bash -n "$REPO_ROOT/infra/12-secret-manager.sh" && /bin/bash -n "$REPO_ROOT/scripts/prod_secrets.sh" \
   && pass "bash -n clean" || fail "bash -n failed"
