@@ -863,6 +863,7 @@ Packages are the easiest way to pay for work nobody uses. The template ships onl
 **Bound package tests on incremental models (#69).** Only an incremental model's window can change between runs, but its package tests scan the full history every night. Downstream, two such tests went from about 42 GiB a night to about 1.2 GiB once bounded.
 
 * For generic tests, add `+where` under `data_tests:` in `dbt_project.yml`. It pushes through views, so partition pruning still works.
+* A generic test's config path includes the folders of the package YAML file that defines it: `data_tests: <package>: <folder>: <test_name>:`. Copy the path from the test's `fqn` in `target/manifest.json`. A path without the folder matches nothing, and dbt only warns about an unused configuration path, so check that warning after adding one.
 * Singular tests ignore `where:`. Disable the package copy and add a local copy in `tests/`, with the same SQL bounded to the window and the same severity.
 * `dbt_project.yml` renders before `vars` exist, so the lookback can't come from `var()` there. Hard-code it, with a comment naming the var it mirrors so a grep finds both.
 

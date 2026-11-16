@@ -32,14 +32,14 @@ version: 2
 #           loaded_at_field: CAST(_DATA_DATE AS TIMESTAMP)
 #
 #   # Package sources often declare no freshness at all, so their tables are never
-#   # checked until you band them here. `overrides:` names the package; list only the
-#   # tables you want checked.
+#   # checked until you band them here. `overrides:` names the package and `name:` its
+#   # source; list only the tables you want checked. Under `overrides:`, tables take
+#   # freshness and loaded_at_field directly, not under `config:` (dbt 1.10 rejects it).
 #   - name: some_connector
 #     overrides: some_connector_source
 #     tables:
 #       - name: orders
-#         config:
-#           freshness:
-#             warn_after: {count: 26, period: hour}
-#             error_after: {count: 50, period: hour}
-#           loaded_at_field: _loaded_at
+#         freshness:
+#           warn_after: {count: 26, period: hour}
+#           error_after: {count: 50, period: hour}
+#         loaded_at_field: _loaded_at

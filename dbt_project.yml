@@ -42,7 +42,8 @@ models:
 # so the window can't come from var() here: hard-code it and name the var it mirrors.
 # data_tests:
 #   some_package:
-#     unique_some_package__events_event_key:
-#       +where: "event_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)"   # mirrors var lookback_days
+#     events:   # folder of the package YAML that defines the test (see its fqn)
+#       unique_some_package__events_event_key:
+#         +where: "event_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)"   # mirrors var lookback_days
 #     some_singular_package_test:
 #       +enabled: false   # singular tests ignore where:; bounded local copy in tests/
