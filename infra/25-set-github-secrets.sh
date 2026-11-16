@@ -64,8 +64,23 @@ secrets=(
   [PROD_SECRETS]="${PROD_SECRETS:-}"
 )
 
+# Optional values: empty in .env means "use the workflow's default", so a secret
+# left over from an earlier run would override it. Delete those instead of skipping.
+OPTIONAL_SECRETS=" PROD_SECRETS "
+
 for key in "${!secrets[@]}"; do
   val="${secrets[$key]}"
+  if [[ -z "$val" && "$OPTIONAL_SECRETS" == *" $key "* ]]; then
+    if out=$(gh secret delete "$key" -R "$GITHUB_REPO" 2>&1); then
+      echo "Deleted secret $key (empty in .env)"
+    elif [[ "$out" == *"404"* ]]; then
+      echo "Skipping $key (empty; $key not set on GitHub)" >&2
+    else
+      echo "$out" >&2
+      exit 1
+    fi
+    continue
+  fi
   if [[ -z "$val" ]]; then
     echo "Skipping $key (empty)" >&2
     continue

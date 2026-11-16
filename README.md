@@ -858,7 +858,7 @@ API keys and passwords the models need at run time (for example in `hooks/pre_ru
 * List them in `infra/.env` as `PROD_SECRETS=API_KEY=api-key,DB_PASS=db-pass`: each entry is the env var the job sees, then the secret's name. Add `:<version>` to pin one; the default is `latest`.
 * `(cd infra && ./12-secret-manager.sh)` creates any missing secret and grants the prod service account `roles/secretmanager.secretAccessor` on each one, not project-wide. It never takes values. Add them yourself: `printf '%s' "$VALUE" | gcloud secrets versions add api-key --data-file=-`. It warns about any secret that has no value yet, because the job won't start until each one has a value.
 * `infra/25-set-github-secrets.sh` copies `PROD_SECRETS` to GitHub. `release.yml` and `infra/30-deploy-cloud-run-job.sh` then pass it to the job as `--set-secrets`.
-* `--set-secrets` replaces the job's whole list. Taking a secret out of `PROD_SECRETS` unmounts it at the next deploy. Emptying `PROD_SECRETS` leaves the old list in place; run `gcloud run jobs update dbt-prod-run --clear-secrets` to remove it.
+* `--set-secrets` replaces the job's whole list. Taking a secret out of `PROD_SECRETS` unmounts it at the next deploy. Emptying `PROD_SECRETS` leaves the old list in place. To remove them all: empty `PROD_SECRETS`, re-run `infra/25-set-github-secrets.sh` (it deletes the `PROD_SECRETS` GitHub secret, or the next release re-mounts them), then run `gcloud run jobs update dbt-prod-run --clear-secrets`.
 
 ## Monitoring
 
