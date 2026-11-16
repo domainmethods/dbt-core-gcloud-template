@@ -71,15 +71,27 @@ dbt ${DBT_NO_COLOR_FLAG} --log-format json deps
 
 DBT_BUILD_ARGS="${DBT_BUILD_ARGS:-}"
 echo "Running dbt build --target ${DBT_TARGET} ${DBT_BUILD_ARGS}"
-dbt ${DBT_NO_COLOR_FLAG} --log-format json build --target "${DBT_TARGET}" ${DBT_BUILD_ARGS}
+# Exit codes are captured, not fatal: a failed step must still emit the summary and
+# upload run_results.json. The first non-zero code is re-raised at the end (#20).
+BUILD_EXIT=0
+dbt ${DBT_NO_COLOR_FLAG} --log-format json build --target "${DBT_TARGET}" ${DBT_BUILD_ARGS} || BUILD_EXIT=$?
+
+# Later dbt commands rewrite target/run_results.json, so keep the build's copy
+# for the summary and the upload below.
+export DBT_RUN_RESULTS_PATH=""
+if [[ -f target/run_results.json ]]; then
+  DBT_RUN_RESULTS_PATH="$(mktemp)"
+  cp target/run_results.json "${DBT_RUN_RESULTS_PATH}"
+fi
 
 # Optional source freshness
+FRESHNESS_EXIT=0
 if [[ "${RUN_FRESHNESS}" == "true" ]]; then
   echo "Running dbt source freshness"
   if [[ -n "${FRESHNESS_SELECT:-}" ]]; then
-    dbt ${DBT_NO_COLOR_FLAG} --log-format json source freshness --select "${FRESHNESS_SELECT}"
+    dbt ${DBT_NO_COLOR_FLAG} --log-format json source freshness --select "${FRESHNESS_SELECT}" || FRESHNESS_EXIT=$?
   else
-    dbt ${DBT_NO_COLOR_FLAG} --log-format json source freshness
+    dbt ${DBT_NO_COLOR_FLAG} --log-format json source freshness || FRESHNESS_EXIT=$?
   fi
   # Summarize freshness (if sources.json exists)
   python scripts/lib/freshness_summary.py
@@ -89,7 +101,8 @@ fi
 DBT_EXIT=0
 python scripts/lib/dbt_summary.py || DBT_EXIT=$?
 
-if [[ "${GENERATE_DOCS:-false}" == "true" ]]; then
+# Docs only for a green build, so a failed night keeps the last good docs.
+if [[ "${GENERATE_DOCS:-false}" == "true" && "${BUILD_EXIT}" -eq 0 ]]; then
   dbt ${DBT_NO_COLOR_FLAG} docs generate --static
   echo "Docs generated at ./target/index.html"
   # Prefer DBT_DOCS_BUCKET; fall back to DBT_ARTIFACTS_BUCKET if not set
@@ -101,20 +114,23 @@ if [[ "${GENERATE_DOCS:-false}" == "true" ]]; then
 fi
 
 # Upload core artifacts to artifacts bucket for Slim CI deferral
+export BUILD_EXIT
 if [[ -n "${DBT_ARTIFACTS_BUCKET:-}" ]]; then
   echo "Uploading manifest.json, run_results.json, and sources.json (if present) to gs://${DBT_ARTIFACTS_BUCKET}/prod/"
   python scripts/lib/upload_artifacts.py
 fi
 
-if [[ "${RUN_POST_HOOK:-false}" == "true" ]]; then
+if [[ "${RUN_POST_HOOK:-false}" == "true" && "${BUILD_EXIT}" -eq 0 && "${FRESHNESS_EXIT}" -eq 0 ]]; then
   echo "Running post_run.py ..."
   python hooks/post_run.py
 fi
 
-# Propagate dbt build failure to Cloud Run
-if [[ "${DBT_EXIT:-0}" -ne 0 ]]; then
-  echo "dbt build had failures; exiting with non-zero status"
-  exit "${DBT_EXIT}"
-fi
+# Propagate the first failure to Cloud Run
+for STEP_EXIT in "${BUILD_EXIT}" "${FRESHNESS_EXIT}" "${DBT_EXIT}"; do
+  if [[ "${STEP_EXIT}" -ne 0 ]]; then
+    echo "dbt build=${BUILD_EXIT} freshness=${FRESHNESS_EXIT} summary=${DBT_EXIT}; exiting ${STEP_EXIT}" >&2
+    exit "${STEP_EXIT}"
+  fi
+done
 
 echo "Completed at $(date -Is)"

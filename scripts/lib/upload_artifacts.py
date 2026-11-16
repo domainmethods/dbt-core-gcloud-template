@@ -10,11 +10,21 @@ if not bucket_name:
     print("DBT_ARTIFACTS_BUCKET not set; skipping artifact upload")
     sys.exit(0)
 
+# CI defers against prod/manifest.json, so only a green build replaces it.
+build_ok = os.environ.get("BUILD_EXIT", "0") == "0"
+paths = {
+    "manifest.json": os.path.join("target", "manifest.json") if build_ok else "",
+    # docs generate rewrites target/run_results.json; upload the build's copy.
+    "run_results.json": os.environ.get("DBT_RUN_RESULTS_PATH") or os.path.join("target", "run_results.json"),
+    "sources.json": os.path.join("target", "sources.json"),
+}
+
 client = storage.Client()
 bucket = client.bucket(bucket_name)
-for name in ("manifest.json", "run_results.json", "sources.json"):
-    p = os.path.join("target", name)
-    if os.path.exists(p):
+for name, p in paths.items():
+    if not p:
+        print(f"Skipping {name}: the build failed, so CI keeps the last good one")
+    elif os.path.exists(p):
         blob = bucket.blob(f"prod/{name}")
         blob.cache_control = "no-cache"
         blob.content_type = "application/json"
