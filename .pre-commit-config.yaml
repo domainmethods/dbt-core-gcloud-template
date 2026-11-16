@@ -54,6 +54,5 @@ repos:
     rev: v1.37.1
     hooks:
       - id: yamllint
-        args: ["-d", "{extends: default, rules: {line-length: {max: 140}, document-start: disable, truthy: disable, comments-indentation: disable, indentation: disable, empty-lines: disable}}"]
+        # Rules live in .yamllint, shared with CI's yamllint job (#33).
         stages: [pre-commit, manual]
-        files: ^models/.*\.(yml|yaml)$
