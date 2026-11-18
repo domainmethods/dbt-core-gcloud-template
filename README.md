@@ -610,8 +610,15 @@ Note on INT_DATASET:
 Runtime defaults (Cloud Run Job):
 
 * Runs `dbt build` then `dbt source freshness` by default in prod (set `RUN_FRESHNESS=false` to disable, or scope with `FRESHNESS_SELECT`).
-* Uploads `manifest.json`, `run_results.json`, and `sources.json` to `gs://$DBT_ARTIFACTS_BUCKET/prod/`. A failed build, freshness check or docs step still uploads `run_results.json` and `sources.json` and then exits non-zero. `manifest.json` is replaced whenever every model, seed and snapshot built, even if data tests failed. The last uploaded one is kept (CI defers against it) when a model, seed or snapshot errored or was skipped, when the build's `run_results.json` is missing, or when `dbt build` exits 2 or higher. The job log says which case applied.
+* Publishes `manifest.json`, `run_results.json`, and `sources.json` to `gs://$DBT_ARTIFACTS_BUCKET/prod/`. A failed build, freshness check or docs step still uploads available diagnostics and exits non-zero. The manifest is eligible when every model, seed and snapshot built, even if data tests failed. CI keeps the last published manifest when a model, seed or snapshot errored or was skipped, when the build's `run_results.json` is missing, or when `dbt build` exits 2 or higher.
 * Optionally generates docs (`GENERATE_DOCS=true`) and uploads `target/index.html` to `gs://$DBT_DOCS_BUCKET/index.html` (falls back to `DBT_ARTIFACTS_BUCKET` if `DBT_DOCS_BUCKET` is unset).
+* Each shared object keeps the newest eligible publication by Cloud Run's reported execution `createTime`, using the execution name to break ties. GCS generation preconditions enforce the comparison at write time. Task retries retain the execution's order. Available `run_results.json` and `sources.json` are also saved under `prod/runs/<execution>/`, including for superseded executions. Bucket lifecycle rules apply to those copies. [Cloud Run execution fields](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.jobs.executions)
+
+The fence covers uploads from scheduled and release-triggered executions. Each object advances independently. BigQuery builds can still overlap and modify the same production relations, so CI's manifest can differ from the warehouse after an overlapping write. GitHub release ordering is tracked separately in [#94](https://github.com/domainmethods/dbt-core-gcloud-template/issues/94).
+
+Before the first fenced release, pause the scheduler, stop other invocations and let every execution using the old image finish. Old images can still overwrite the shared objects directly. Resume the scheduler once the job uses the new image. When deploying with `infra/30-deploy-cloud-run-job.sh`, use a fresh `IMAGE_TAG` so it builds the new image.
+
+The default bootstrap's runtime service account already has `run.executions.get` and GCS object access. Custom runtime roles need `run.executions.get` and permission to read and replace the shared GCS objects. Direct uploads outside Cloud Run can write to unmarked objects. Replacing a fenced object requires a Cloud Run execution identity.
 
 > Cloud Run **Jobs** are built for batch/ETL: they run to completion and can be executed on a schedule by Cloud Scheduler without standing up servers.
 

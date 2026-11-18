@@ -6,6 +6,8 @@ import sys
 
 from google.cloud import storage
 
+from artifact_publication import cloud_run_order, publish
+
 bucket_name = os.environ.get("DBT_ARTIFACTS_BUCKET")
 if not bucket_name:
     print("DBT_ARTIFACTS_BUCKET not set; skipping artifact upload")
@@ -53,7 +55,7 @@ def manifest_decision():
 
 
 upload_manifest, reason = manifest_decision()
-print(f"manifest.json: {'uploading' if upload_manifest else 'keeping the last uploaded one'}: {reason}")
+print(f"manifest.json: {'eligible to publish' if upload_manifest else 'keeping the last uploaded one'}: {reason}")
 paths = {
     "manifest.json": os.path.join("target", "manifest.json") if upload_manifest else "",
     "run_results.json": run_results_path,
@@ -62,15 +64,20 @@ paths = {
 
 client = storage.Client()
 bucket = client.bucket(bucket_name)
+execution = os.environ.get("CLOUD_RUN_EXECUTION")
+if execution:
+    # Save the run's diagnostics even if it is stale or the execution lookup fails.
+    for name in ("run_results.json", "sources.json"):
+        if os.path.exists(paths[name]):
+            diagnostic = bucket.blob(f"prod/runs/{execution}/{name}")
+            diagnostic.upload_from_filename(paths[name], content_type="application/json")
+            print(f"Uploaded gs://{bucket_name}/{diagnostic.name}")
+
+order = cloud_run_order()
 for name, p in paths.items():
     if not p:
         print(f"Skipping {name} (see reason above)")
     elif os.path.exists(p):
-        blob = bucket.blob(f"prod/{name}")
-        blob.cache_control = "no-cache"
-        blob.content_type = "application/json"
-        with open(p, "rb") as f:
-            blob.upload_from_file(f, content_type="application/json")
-        print(f"Uploaded gs://{bucket_name}/prod/{name}")
+        publish(bucket, f"prod/{name}", p, "application/json", order)
     else:
         print(f"Skipping missing {p}")
