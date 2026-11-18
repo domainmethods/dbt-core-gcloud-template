@@ -152,8 +152,8 @@ harden_dataset_acl_writer_only() {
   update_dataset_acl "${3}:$1" '
     map(select(.specialGroup != "projectWriters"))
     | map(select(.role != "WRITER" or (.userByEmail == $writer)))
-    | . + [{"role":"WRITER","userByEmail": $writer}]
-    | unique_by(.role, (.userByEmail // ""), (.groupByEmail // ""), (.specialGroup // ""))
+    | {"role":"WRITER","userByEmail": $writer} as $entry
+    | if any(.[]; . == $entry) then . else . + [$entry] end
   ' --arg writer "$2"
 }
 
