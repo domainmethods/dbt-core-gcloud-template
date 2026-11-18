@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# CI build strategy (git-diff-scoped):
+# CI build strategy (git-diff-scoped). The workflow has already run dbt deps.
 #   1. No model changes detected                     → dbt parse only (syntax check)
 #   2. No production manifest available, or FULL_BUILD=true (requirements.txt /
 #      profiles/ changed: a dbt or adapter bump that state:modified can't see)
@@ -73,8 +73,6 @@ elif [[ -n "${DBT_ARTIFACTS_BUCKET:-}" ]]; then
 else
   echo "DBT_ARTIFACTS_BUCKET not set, skipping production manifest download"
 fi
-
-dbt deps
 
 echo ""
 echo "=== dbt Build Strategy ==="
