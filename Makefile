@@ -37,6 +37,7 @@ test-scripts:
 	bash scripts/tests/test_docs_website.sh
 	bash scripts/tests/test_ci_workflow.sh
 	bash scripts/tests/test_entrypoint.sh
+	bash scripts/tests/test_policy_updates.sh
 	python3 scripts/tests/test_release_workflow.py
 
 lint:

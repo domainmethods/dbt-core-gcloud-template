@@ -3,6 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 source ./.env
+source ../scripts/lib/bigquery_acl.sh
 
 command -v gcloud >/dev/null || { echo "gcloud not found"; exit 1; }
 command -v bq >/dev/null || { echo "bq not found"; exit 1; }
@@ -91,139 +92,47 @@ ensure_dataset(){ local ds="$1" desc="$2"; if bq --location="$BQ_LOCATION" show 
 
 ensure_project_binding(){ local role="$1" member="$2"; if gcloud projects get-iam-policy "$PROJECT_ID" --format=json | jq -e --arg r "$role" --arg m "$member" '.bindings[]? | select(.role==$r) | .members[]? | select(.==$m)' >/dev/null 2>&1; then info "Project IAM binding exists: $role -> $member"; else info "Adding project IAM binding: $role -> $member"; gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="$member" --role="$role" --quiet >/dev/null; fi; }
 
-add_dataset_binding () {
-  local dataset="$1" role="$2" member="$3"
-  local tmp="${TMP_DIR}/ds_iam_old.json"
-  if ! bq --project_id="${PROJECT_ID}" get-iam-policy --format=prettyjson "${PROJECT_ID}:${dataset}" > "${tmp}" 2>/dev/null; then
-    echo '{"bindings":[],"version":1}' > "${tmp}"
-  fi
-  local tmp2="${TMP_DIR}/ds_iam_new.json"
-  jq --arg role "${role}" --arg member "${member}" '
-    .bindings |= (. // []) |
-    if any(.bindings[]?; .role==$role) then
-      .bindings |= map(if .role==$role then (.members += [$member] | .members |= unique) else . end)
-    else
-      .bindings += [{"role": $role, "members": [$member]}]
-    end
-  ' "${tmp}" > "${tmp2}"
-  if ! diff -q "${tmp}" "${tmp2}" >/dev/null 2>&1; then
-    info "Updating dataset IAM: ${dataset} ${role} += ${member}"
-    # Try IAM first (newer surface). Using 'if' avoids exiting under 'set -e' on nonzero.
-    if bq --project_id="${PROJECT_ID}" set-iam-policy "${PROJECT_ID}:${dataset}" "${tmp2}" >/dev/null 2>&1; then
-      info "Dataset IAM updated: ${dataset} (${role})"
-    else
-      warn "Failed to set IAM on dataset ${PROJECT_ID}:${dataset} via IAM API. Attempting legacy ACL fallback."
-      # Fallback mapping: dataViewer->READER, dataEditor->WRITER
-      local acl_role="" ent_key="" ent_val=""
-      case "$role" in
-        roles/bigquery.dataViewer) acl_role="READER" ;;
-        roles/bigquery.dataEditor) acl_role="WRITER" ;;
-        *) acl_role="" ;;
-      esac
-      if [[ -n "$acl_role" ]]; then
-        if [[ "$member" == serviceAccount:* || "$member" == user:* ]]; then
-          ent_key="userByEmail"; ent_val="${member#*:}"
-        elif [[ "$member" == group:* ]]; then
-          ent_key="groupByEmail"; ent_val="${member#group:}"
-        else
-          ent_key=""; ent_val=""
-        fi
-        if [[ -n "$ent_key" && -n "$ent_val" ]]; then
-          local ds_tmp ds_new
-          ds_tmp="${TMP_DIR}/ds_acl_old.json"; ds_new="${TMP_DIR}/ds_acl_new.json"
-          if bq --project_id="${PROJECT_ID}" show --format=prettyjson "${dataset}" >"$ds_tmp" 2>/dev/null; then
-            jq --arg role "$acl_role" --arg key "$ent_key" --arg val "$ent_val" '
-              .access = ((.access // []) + [{($key): $val, role: $role}])
-              | .access |= unique_by(.role, (.userByEmail // ""), (.groupByEmail // ""), (.specialGroup // ""))
-            ' "$ds_tmp" > "$ds_new"
-            if ! diff -q "$ds_tmp" "$ds_new" >/dev/null 2>&1; then
-              if bq --project_id="${PROJECT_ID}" update --source "$ds_new" "${dataset}" >/dev/null 2>&1; then
-                info "Dataset ACL fallback updated: ${dataset} ${acl_role} += ${ent_val}"
-              else
-                warn "ACL fallback failed to update dataset ${PROJECT_ID}:${dataset}."
-              fi
-            else
-              info "Dataset ACL already had ${acl_role} for ${ent_val}"
-            fi
-          else
-            warn "Failed to fetch dataset ${PROJECT_ID}:${dataset} for ACL fallback."
-          fi
-        else
-          warn "Unsupported member for ACL fallback: ${member}"
-        fi
-      else
-        warn "No ACL fallback mapping for role ${role}; skipping."
-      fi
-    fi
-  else
-    info "Dataset IAM already set: ${dataset} ${role} has ${member}"
-  fi
-}
-
 # Harden dataset ACLs so that only the specified writer_email has WRITER; all others get no write.
 # Keeps projectOwners and projectReaders; removes projectWriters and any other WRITER entries.
 harden_dataset_acl_writer_only() {
-  local dataset="$1" writer_email="$2"
-  local ds_tmp ds_new
-  ds_tmp="${TMP_DIR}/harden_old.json"; ds_new="${TMP_DIR}/harden_new.json"
-  if ! bq --project_id="${PROJECT_ID}" show --format=prettyjson "${dataset}" >"$ds_tmp" 2>/dev/null; then
-    warn "Failed to fetch dataset ${PROJECT_ID}:${dataset} for ACL hardening"
-    return 0
-  fi
-  jq --arg writer "$writer_email" '
-    .access = (
-      (.access // [])
-      # Drop projectWriters entry entirely
-      | map(select(.specialGroup != "projectWriters"))
-      # Drop any WRITER that is not the designated writer
-      | map(select(.role != "WRITER" or (.userByEmail == $writer)))
-      # Ensure designated writer entry exists
-      | ((. + [{"role":"WRITER","userByEmail": $writer}])
-        | unique_by(.role, (.userByEmail // ""), (.groupByEmail // ""), (.specialGroup // "")))
-    )
-  ' "$ds_tmp" > "$ds_new"
-  if ! diff -q "$ds_tmp" "$ds_new" >/dev/null 2>&1; then
-    if bq --project_id="${PROJECT_ID}" update --source "$ds_new" "${dataset}" >/dev/null 2>&1; then
-      info "Hardened ACLs: ${dataset} writer only -> ${writer_email}"
-    else
-      warn "Failed to harden ACLs on ${PROJECT_ID}:${dataset}"
-    fi
-  else
-    info "ACLs already hardened for ${dataset}"
+  update_dataset_acl "${PROJECT_ID}:$1" '
+    map(select(.specialGroup != "projectWriters"))
+    | map(select(.role != "WRITER" or (.userByEmail == $writer)))
+    | . + [{"role":"WRITER","userByEmail": $writer}]
+    | unique_by(.role, (.userByEmail // ""), (.groupByEmail // ""), (.specialGroup // ""))
+  ' --arg writer "$2"
+}
+
+read_bucket_policy() {
+  local bucket="$1" policy_file="$2"
+  if ! gcloud storage buckets get-iam-policy "gs://${bucket}" --format=json --project "$PROJECT_ID" > "$policy_file" ||
+     ! jq -es '
+       length == 1 and (.[0] |
+         (.etag | type == "string" and length > 0 and . != "*")
+         and (.bindings == null or (.bindings | type == "array")))
+     ' "$policy_file" >/dev/null; then
+    echo "[error] Could not read a versioned IAM policy for gs://${bucket}" >&2
+    return 1
   fi
 }
 
 # Ensure a member has a role on a GCS bucket via get-modify-set flow (idempotent)
 ensure_bucket_binding () {
   local bucket="$1" role="$2" member="$3"
-  local tmp="${TMP_DIR}/bkt_iam_old.json"
-  if ! gcloud storage buckets get-iam-policy "gs://${bucket}" --format=json --project "${PROJECT_ID}" > "${tmp}" 2>/dev/null; then
-    echo '{"bindings":[],"version":3}' > "${tmp}"
-  fi
-  local tmp2="${TMP_DIR}/bkt_iam_new.json"
+  local tmp="${TMP_DIR}/bkt_iam_old.json" tmp2="${TMP_DIR}/bkt_iam_new.json"
+  read_bucket_policy "$bucket" "$tmp"
   jq --arg role "${role}" --arg member "${member}" '
-    .bindings = (.bindings // []) |
-    if any(.bindings[]?; .role==$role) then
-      .bindings |= map(if .role==$role then (.members += [$member] | .members |= unique) else . end)
+    def target: .role == $role and .condition == null;
+    if any(.bindings[]?; target and (.members | index($member))) then .
+    elif any(.bindings[]?; target) then
+      .bindings |= map(if target then .members += [$member] else . end)
     else
       .bindings += [{"role": $role, "members": [$member]}]
     end
   ' "${tmp}" > "${tmp2}"
-  if ! diff -q "${tmp}" "${tmp2}" >/dev/null 2>&1; then
+  if ! jq -es '.[0] == .[1]' "$tmp" "$tmp2" >/dev/null; then
     info "Updating bucket IAM: gs://${bucket} ${role} += ${member}"
-    if ! gcloud storage buckets set-iam-policy "gs://${bucket}" "${tmp2}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
-      warn "set-iam-policy failed; falling back to add-iam-policy-binding"
-      if ! gcloud storage buckets add-iam-policy-binding "gs://${bucket}" \
-        --member "${member}" \
-        --role "${role}" \
-        --project "${PROJECT_ID}" >/dev/null 2>&1; then
-        warn "add-iam-policy-binding failed; attempting gsutil iam ch as final fallback"
-        # gsutil IAM binding syntax for Cloud Storage (accepts full role name)
-        if ! gsutil iam ch "${member}:${role}" "gs://${bucket}" >/dev/null 2>&1; then
-          warn "gsutil iam ch also failed for gs://${bucket} (${role} <- ${member})"
-        fi
-      fi
-    fi
+    gcloud storage buckets set-iam-policy "gs://${bucket}" "${tmp2}" --project "${PROJECT_ID}" >/dev/null
   else
     info "Bucket IAM already set: gs://${bucket} ${role} has ${member}"
   fi
@@ -449,7 +358,7 @@ info "Ensuring dataset-level IAM"
 if [[ "${MANAGE_DATASET_IAM:-true}" == "true" ]]; then
 if [[ -n "${INT_DATASET:-}" ]]; then
   # CI should be able to write; others query-only
-  add_dataset_binding "${INT_DATASET}"  "roles/bigquery.dataViewer" "serviceAccount:${CI_SA_EMAIL}"
+  add_dataset_acl_entry "${PROJECT_ID}:${INT_DATASET}" READER "${CI_SA_EMAIL}"
   if [[ "${INT_HARDEN_ACL:-true}" == "true" ]]; then
     harden_dataset_acl_writer_only "${INT_DATASET}" "${CI_SA_EMAIL}"
   else
@@ -458,7 +367,7 @@ if [[ -n "${INT_DATASET:-}" ]]; then
 else
   info "INT_DATASET not set; skipping integration dataset IAM"
 fi
-add_dataset_binding "${PROD_DATASET}" "roles/bigquery.dataViewer" "serviceAccount:${CI_SA_EMAIL}"
+add_dataset_acl_entry "${PROJECT_ID}:${PROD_DATASET}" READER "${CI_SA_EMAIL}"
 if [[ "${PROD_HARDEN_ACL:-true}" == "true" ]]; then
   harden_dataset_acl_writer_only "${PROD_DATASET}" "${PROD_SA_EMAIL}"
 else
@@ -500,15 +409,7 @@ fi
 # Allow docs viewer SA to read docs (if defined)
 if [[ -n "${DOCS_VIEWER_SA_ID:-}" ]]; then
   viewer_email="${DOCS_VIEWER_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
-  if ! gcloud storage buckets get-iam-policy "gs://${DBT_DOCS_BUCKET}" --format=json --project "${PROJECT_ID}" | jq -e --arg m "serviceAccount:${viewer_email}" '.bindings[]? | select(.role=="roles/storage.objectViewer") | .members[]? | select(.==$m)' >/dev/null; then
-    gcloud storage buckets add-iam-policy-binding "gs://${DBT_DOCS_BUCKET}" \
-      --member="serviceAccount:${viewer_email}" \
-      --role="roles/storage.objectViewer" \
-      --project "${PROJECT_ID}" --quiet
-    info "Added storage.objectViewer on bucket to ${viewer_email}"
-  else
-    info "Bucket IAM already set for docs viewer SA"
-  fi
+  ensure_bucket_binding "${DBT_DOCS_BUCKET}" "roles/storage.objectViewer" "serviceAccount:${viewer_email}"
 fi
 
 info "Bootstrap complete."
