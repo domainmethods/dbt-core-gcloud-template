@@ -21,6 +21,8 @@ DEV_PROJECT=${DBT_GCP_PROJECT_CI:?set DBT_GCP_PROJECT_CI}
 DEV_DATASET=${DBT_BQ_DATASET:?set DBT_BQ_DATASET}
 PROD_PROJECT=${DBT_GCP_PROJECT_PROD:-$DEV_PROJECT}
 DEFAULT_PROD_DATASET=${DBT_BQ_DATASET_PROD:-analytics}
+# shortcut: bound each metadata result to 10,000 rows, paginate explicitly if datasets routinely exceed it.
+readonly METADATA_ROW_LIMIT=10000
 
 # Docs/config-only PRs change no models — skip the diff entirely (no jq/bq/dbt work).
 if [[ "${HAS_MODEL_CHANGES:-true}" == "false" ]]; then
@@ -117,16 +119,22 @@ node_to_fqn() {
   }'
 }
 
-# Helper: safe bq query to JSON; echoes JSON or empty and returns non-zero on error
-# Cap at 1GB scanned to prevent runaway costs on INFORMATION_SCHEMA queries
+# Query failures are logged and cached as empty for the per-model error report.
+# bq follows pages up to --max_rows. Request one extra row to detect overflow.
 bq_json() {
   local project=$1 sql=$2
   local out
-  out=$(bq --project_id="$project" query --nouse_legacy_sql --format=json --maximum_bytes_billed=1000000000 "$sql" 2>&1) || {
-    echo "$out" >&2
+  if ! out=$(bq --quiet --project_id="$project" query --nouse_legacy_sql --format=json \
+    --start_row=0 --max_rows="$((METADATA_ROW_LIMIT + 1))" --maximum_bytes_billed=1000000000 "$sql"); then
+    [[ -z "$out" ]] || printf '%s\n' "$out" >&2
+    return 0
+  fi
+  if jq -e --argjson limit "$METADATA_ROW_LIMIT" 'type == "array" and length > $limit' \
+    >/dev/null 2>&1 <<< "$out"; then
+    echo "[error] BigQuery metadata result limit ($METADATA_ROW_LIMIT rows) exceeded by: $sql" >&2
     return 1
-  }
-  echo "$out"
+  fi
+  printf '%s' "$out"
 }
 
 # Returns 0 if the argument parses as a JSON array.
@@ -161,7 +169,7 @@ ensure_columns_cached() {
   local project=$1 dataset=$2 key="$1.$2"
   if [[ -z "${DS_LOADED[cols:$key]:-}" ]]; then
     DS_LOADED[cols:$key]=1
-    DS_COLS[$key]=$(bq_json "$project" "SELECT table_name, column_name, ordinal_position, data_type, is_nullable FROM \`$project.$dataset\`.INFORMATION_SCHEMA.COLUMNS ORDER BY table_name, ordinal_position" || true)
+    DS_COLS[$key]=$(bq_json "$project" "SELECT table_name, column_name, ordinal_position, data_type, is_nullable FROM \`$project.$dataset\`.INFORMATION_SCHEMA.COLUMNS ORDER BY table_name, ordinal_position") || return
   fi
   return 0
 }
@@ -170,7 +178,7 @@ ensure_tables_cached() {
   local project=$1 dataset=$2 key="$1.$2"
   if [[ -z "${DS_LOADED[tbl:$key]:-}" ]]; then
     DS_LOADED[tbl:$key]=1
-    DS_TBL[$key]=$(bq_json "$project" "SELECT table_name, table_type FROM \`$project.$dataset\`.INFORMATION_SCHEMA.TABLES" || true)
+    DS_TBL[$key]=$(bq_json "$project" "SELECT table_name, table_type FROM \`$project.$dataset\`.INFORMATION_SCHEMA.TABLES") || return
   fi
   return 0
 }
@@ -179,7 +187,7 @@ ensure_options_cached() {
   local project=$1 dataset=$2 key="$1.$2"
   if [[ -z "${DS_LOADED[opt:$key]:-}" ]]; then
     DS_LOADED[opt:$key]=1
-    DS_OPT[$key]=$(bq_json "$project" "SELECT table_name, option_name, option_value FROM \`$project.$dataset\`.INFORMATION_SCHEMA.TABLE_OPTIONS WHERE option_name IN ('partitioning_type','partitioning_field','require_partition_filter','clustering_fields')" || true)
+    DS_OPT[$key]=$(bq_json "$project" "SELECT table_name, option_name, option_value FROM \`$project.$dataset\`.INFORMATION_SCHEMA.TABLE_OPTIONS WHERE option_name IN ('partitioning_type','partitioning_field','require_partition_filter','clustering_fields')") || return
   fi
   return 0
 }
@@ -193,10 +201,9 @@ ensure_options_cached() {
 # single model and the query count would be worse than before batching.
 ensure_dataset_cached() {
   local project=$1 dataset=$2
-  ensure_columns_cached "$project" "$dataset"
-  ensure_tables_cached "$project" "$dataset"
+  ensure_columns_cached "$project" "$dataset" || return
+  ensure_tables_cached "$project" "$dataset" || return
   ensure_options_cached "$project" "$dataset"
-  return 0
 }
 
 # Filters a cached dataset-wide blob down to one table.
@@ -220,20 +227,20 @@ ds_filter() {
 
 bq_columns() {
   local project=$1 dataset=$2 ident=$3
-  ensure_columns_cached "$project" "$dataset"
+  ensure_columns_cached "$project" "$dataset" || return
   ds_filter "${DS_COLS[$project.$dataset]:-}" "$ident" \
     '{column_name, ordinal_position, data_type, is_nullable}'
 }
 
 bq_table_type() {
   local project=$1 dataset=$2 ident=$3
-  ensure_tables_cached "$project" "$dataset"
+  ensure_tables_cached "$project" "$dataset" || return
   ds_filter "${DS_TBL[$project.$dataset]:-}" "$ident" '{table_type}'
 }
 
 bq_table_options() {
   local project=$1 dataset=$2 ident=$3
-  ensure_options_cached "$project" "$dataset"
+  ensure_options_cached "$project" "$dataset" || return
   ds_filter "${DS_OPT[$project.$dataset]:-}" "$ident" '{option_name, option_value}'
 }
 
@@ -245,7 +252,7 @@ bq_table_options() {
 # twice. Returns the raw blob; the caller does its own guarded parse.
 bq_tables_raw() {
   local project=$1 dataset=$2
-  ensure_tables_cached "$project" "$dataset"
+  ensure_tables_cached "$project" "$dataset" || return
   printf '%s' "${DS_TBL[$project.$dataset]:-}"
 }
 
@@ -279,16 +286,15 @@ normalize_options() {
 
 compute_column_diff() {
   local dev_json=$1 prod_json=$2
-  # `-n` is required: nothing is piped in, so without it jq has zero inputs,
-  # runs the filter zero times, and exits 0 having printed nothing.
-  jq -n -r --argjson dev "$dev_json" --argjson prod "$prod_json" '
+  # Read from stdin so wide schemas fit without relying on the OS argument-size limit.
+  printf '%s\n' "$dev_json" "$prod_json" | jq -s -r '
     def mapcols($arr): reduce $arr[] as $c ({}; .[$c.column_name] = {type: $c.data_type, nullable: $c.is_nullable});
     def keys_of($m): ($m|keys|sort);
     def inter($a;$b): ($a + $b | group_by(.) | map(select(length==2) | .[0]));
     def minus($a;$b): ($a - $b);
     
-    (mapcols($dev)) as $dm
-    | (mapcols($prod)) as $pm
+    (mapcols(.[0])) as $dm
+    | (mapcols(.[1])) as $pm
     | (keys_of($dm)) as $dk
     | (keys_of($pm)) as $pk
     | {
@@ -443,14 +449,9 @@ for m in "${MODELS[@]}"; do
   # no longer matches the substring test, silently downgrading a permissions
   # failure to a clean OK diff.
   #
-  # Every value that feeds the diff is classified, on both sides. Classifying
-  # only prod columns left two silent downgrades: a denial on the prod TABLES
-  # query reported a permissions failure as NEW_MODEL, and a denial on the dev
-  # COLUMNS query reported every prod column as removed under status=OK.
-  # Table options are deliberately excluded: a zero-row TABLE_OPTIONS result is
-  # normal for an unpartitioned table and is not distinguishable from a failure.
+  # Classify every metadata fetch. A successful zero-row result is a JSON array.
   status="OK"
-  for raw_result in "$prod_cols_json" "$dev_cols_json" "$prod_type_json" "$dev_type_json"; do
+  for raw_result in "$prod_cols_json" "$dev_cols_json" "$prod_type_json" "$dev_type_json" "$prod_opts_json" "$dev_opts_json"; do
     raw_class=$(classify_raw "$raw_result")
     if [[ "$raw_class" == "AUTH_ERROR" ]]; then
       status="AUTH_ERROR"
@@ -461,12 +462,8 @@ for m in "${MODELS[@]}"; do
   done
 
   # --- Normalize at the jq boundary. ---
-  dev_cols=$(as_json_array "${dev_cols_json:-}")
-  prod_cols=$(as_json_array "${prod_cols_json:-}")
   dev_type_arr=$(as_json_array "${dev_type_json:-}")
   prod_type_arr=$(as_json_array "${prod_type_json:-}")
-  dev_opts_arr=$(as_json_array "${dev_opts_json:-}")
-  prod_opts_arr=$(as_json_array "${prod_opts_json:-}")
 
   # Detect new model (no prod table row). Only reclassify a clean OK status so
   # AUTH_ERROR and NON_JSON are not overwritten.
@@ -476,22 +473,20 @@ for m in "${MODELS[@]}"; do
   fi
   dev_type=$(printf '%s' "$dev_type_arr" | jq -r '.[0].table_type // empty')
 
-  # Normalize options
-  dev_opts=$(printf '%s' "$dev_opts_arr" | normalize_options)
-  prod_opts=$(printf '%s' "$prod_opts_arr" | normalize_options)
-
-  # Column diff (skip if auth error and not new model)
+  # Only report schema changes when both metadata sets are usable.
   added=0; removed=0; changed=0
+  type_change=""; opt_changes_cnt=0
   if [[ "$status" == "OK" || "$status" == "NEW_MODEL" ]]; then
-    col_diff=$(compute_column_diff "$dev_cols" "$prod_cols")
+    col_diff=$(compute_column_diff "$dev_cols_json" "$prod_cols_json")
     added=$(echo "$col_diff" | jq -r '.added | length')
     removed=$(echo "$col_diff" | jq -r '.removed | length')
     changed=$(echo "$col_diff" | jq -r '.changed | length')
+    dev_opts=$(printf '%s' "$dev_opts_json" | normalize_options)
+    prod_opts=$(printf '%s' "$prod_opts_json" | normalize_options)
+    meta_diff=$(compute_meta_diff "$dev_type" "$prod_type" "$dev_opts" "$prod_opts")
+    type_change=$(echo "$meta_diff" | jq -r '.table_type_change | if .==null then "" else (.from + "→" + .to) end')
+    opt_changes_cnt=$(echo "$meta_diff" | jq -r '.option_changes | length')
   fi
-
-  meta_diff=$(compute_meta_diff "$dev_type" "$prod_type" "$dev_opts" "$prod_opts")
-  type_change=$(echo "$meta_diff" | jq -r '.table_type_change | if .==null then "" else (.from + "→" + .to) end')
-  opt_changes_cnt=$(echo "$meta_diff" | jq -r '.option_changes | length')
 
   echo "Table types: dev=$dev_type prod=${prod_type:-<none>}" | tee -a "$out"
 
@@ -502,10 +497,9 @@ for m in "${MODELS[@]}"; do
     echo "$col_diff" | jq -r '.removed[]? | "  - " + .' | tee -a "$out"
     echo "Columns changed ($changed):" | tee -a "$out"
     echo "$col_diff" | jq -r '.changed[]? | "  * " + .name + ": dev=(" + .dev.type + "/" + .dev.nullable + ") prod=(" + .prod.type + "/" + .prod.nullable + ")"' | tee -a "$out"
+    echo "Partition/Clustering changes ($opt_changes_cnt):" | tee -a "$out"
+    echo "$meta_diff" | jq -r '.option_changes[]? | "  ~ " + .key + ": dev=" + (.to|tostring) + ", prod=" + (.from|tostring)' | tee -a "$out"
   fi
-
-  echo "Partition/Clustering changes ($opt_changes_cnt):" | tee -a "$out"
-  echo "$meta_diff" | jq -r '.option_changes[]? | "  ~ " + .key + ": dev=" + (.to|tostring) + ", prod=" + (.from|tostring)' | tee -a "$out"
 
   # Summary line for downstream parsing if needed
   echo "SUMMARY|model=$m|status=$status|moved=$move|type_change=${type_change:-none}|added=$added|removed=$removed|changed=$changed|opt_changes=$opt_changes_cnt" | tee -a "$out"
@@ -520,9 +514,8 @@ for m in "${MODELS[@]}"; do
   echo "| $m | $status | $moved_cell | ${type_change:-} | $added | $removed | $changed | $partcell |" >> "$summary_md"
 done
 
-# Orphans report — best-effort, never fails CI.
-# Isolated in a subshell with relaxed error handling: this is a side report,
-# and a failure here must never abort the schema diff for changed models.
+# Orphans report warns on unreadable datasets. Overflow fails the schema-diff
+# step so CI does not publish a partial count.
 orphans_md="$ARTIFACT_DIR/orphans.md"
 (
   set +euo pipefail
@@ -559,7 +552,7 @@ orphans_md="$ARTIFACT_DIR/orphans.md"
     # Same query as the batched TABLES fetch, so it reuses that cache entry
     # instead of issuing a duplicate. For a prod dataset the model loop already
     # visited this costs nothing.
-    list_json=$(bq_tables_raw "$PROD_PROJECT" "$ds") || true
+    list_json=$(bq_tables_raw "$PROD_PROJECT" "$ds") || exit 1
     if [[ -z "$list_json" ]]; then
       echo "[warn] Could not list tables in $PROD_PROJECT.$ds (no access?)" >> "$orphans_md"
       continue
@@ -587,7 +580,7 @@ orphans_md="$ARTIFACT_DIR/orphans.md"
       echo "- $o" >> "$orphans_md"
     done
   fi
-) || echo "[warn] Orphan detection encountered errors; see $orphans_md" >&2
+) || exit 1
 
 echo "Schema diff reports written to $ARTIFACT_DIR/"
 exit 0
