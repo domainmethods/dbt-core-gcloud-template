@@ -100,8 +100,8 @@ diff/comment steps (which gate on model-build success only).
 
 - **Mixed changes: build ⊋ diff.** The build unions `state:modified+` for macro and resource YAML coverage.
   The diff uses the git scope only.
-- **Fallback path is manifest-dependent.** Model-change PRs are manifest-independent for build
-  scoping; macro/config/yaml-only PRs still use `state:modified+` and can over-select if the prod
-  manifest is stale.
+- **Fallback path is manifest-dependent.** Model-change PRs that touch no macro, config or resource
+  YAML are manifest-independent for build scoping. Any PR that touches those files adds
+  `state:modified+` and can over-select if the prod manifest is stale.
 - **Classes 2 & 3 are data-modeling fixes**, not CI features — the template can't fix a consumer's
   non-deterministic models; this doc is the guidance.
