@@ -13,21 +13,18 @@ if not bucket_name:
     print("DBT_ARTIFACTS_BUCKET not set; skipping artifact upload")
     sys.exit(0)
 
-# docs generate rewrites target/run_results.json; read and upload the build's copy.
+# The entrypoint saves these before freshness and docs can replace them.
 run_results_path = os.environ.get("DBT_RUN_RESULTS_PATH") or os.path.join("target", "run_results.json")
+build_manifest_path = os.environ.get("DBT_BUILD_MANIFEST_PATH", "")
 
 # Resource types whose prod relation is (re)built from the manifest.
 BUILT_TYPES = ("model", "seed", "snapshot")
-# Statuses meaning that relation was not (fully) rebuilt. dbt build skips the
-# children of an errored node *and* of a failed test, so a skipped model means
-# prod no longer matches the new manifest either way.
-NOT_BUILT = ("error", "skipped", "partial success")
 
 
 def manifest_decision():
     """Return (upload, reason). CI defers against prod/manifest.json and diffs
-    schemas against it, so replace it only when every model/seed/snapshot was
-    built. Failing tests or warnings alone (dbt exits 1) don't block it."""
+    schemas against it, so replace it only after every enabled persisted
+    model, seed and snapshot in the build manifest succeeds."""
     raw_exit = os.environ.get("BUILD_EXIT", "0")
     try:
         build_exit = int(raw_exit)
@@ -37,19 +34,31 @@ def manifest_decision():
         return False, f"dbt build exited {build_exit} (runtime/internal error, not a node failure)"
     try:
         with open(run_results_path) as f:
-            results = json.load(f)["results"]
-    except Exception as e:
+            statuses = {r["unique_id"]: r["status"] for r in json.load(f)["results"]}
+    except (KeyError, OSError, TypeError, ValueError) as e:
         return False, f"the build's run_results.json is missing or unreadable ({e})"
+    try:
+        with open(build_manifest_path) as f:
+            nodes = json.load(f)["nodes"]
+        expected = [
+            uid
+            for uid, node in nodes.items()
+            if node["resource_type"] in BUILT_TYPES
+            and node["config"]["enabled"]
+            and node["config"]["materialized"] != "ephemeral"
+        ]
+    except (AttributeError, KeyError, OSError, TypeError, ValueError) as e:
+        return False, f"the build's manifest.json is missing or unreadable ({e})"
     not_built = [
-        f"{r.get('unique_id')} ({r.get('status')})"
-        for r in results
-        if str(r.get("unique_id", "")).split(".")[0] in BUILT_TYPES and r.get("status") in NOT_BUILT
+        f"{uid} ({statuses.get(uid, 'no result')})"
+        for uid in sorted(expected)
+        if statuses.get(uid) != "success"
     ]
     if not_built:
         return False, "not built: " + ", ".join(not_built)
     if build_exit == 0:
         return True, "dbt build succeeded"
-    if not any(r.get("status") in ("error", "fail") for r in results):
+    if not any(status in ("error", "fail") for status in statuses.values()):
         return False, f"dbt build exited {build_exit} but run_results.json shows no failing node"
     return True, f"dbt build exited {build_exit} with test failures/warnings only; every model/seed/snapshot built"
 
@@ -57,7 +66,7 @@ def manifest_decision():
 upload_manifest, reason = manifest_decision()
 print(f"manifest.json: {'eligible to publish' if upload_manifest else 'keeping the last uploaded one'}: {reason}")
 paths = {
-    "manifest.json": os.path.join("target", "manifest.json") if upload_manifest else "",
+    "manifest.json": build_manifest_path if upload_manifest else "",
     "run_results.json": run_results_path,
     "sources.json": os.path.join("target", "sources.json"),
 }

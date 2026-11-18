@@ -32,6 +32,8 @@ jobs:
       # PyYAML comes with yamllint, which these checks need.
       - name: Check ci.yml gates
         run: bash scripts/tests/test_ci_workflow.sh
+      - name: Test release workflow with CLI stubs
+        run: python3 scripts/tests/test_release_workflow.py
 
   lint:
     runs-on: ubuntu-latest
@@ -40,15 +42,21 @@ jobs:
       - name: Test shell scripts
         run: |
           bash scripts/tests/test_pr_schema_diff.sh
+          bash scripts/tests/test_artifacts_lifecycle.sh
           bash scripts/tests/test_pr_data_diff.sh
           bash scripts/tests/test_get_changed_models.sh
           bash scripts/tests/test_ci_build.sh
+          bash scripts/tests/test_ci_datasets.sh
+          bash scripts/tests/test_bootstrap_project_grants.sh
           bash scripts/tests/test_upsert_pr_comment.sh
           bash scripts/tests/test_lookup_prod_manifest.sh
+          bash scripts/tests/test_docs_website.sh
           bash scripts/tests/test_entrypoint.sh
           bash scripts/tests/test_verify_timezone_conventions.sh
           bash scripts/tests/test_deploy_and_schedule.sh
           bash scripts/tests/test_set_github_secrets.sh
+          bash scripts/tests/test_policy_updates.sh
+          bash scripts/tests/test_wif_github.sh
       # Timezone conventions (#68): no zone conversion before marts, no DATETIME(TIMESTAMP(x))
       # double shift without a `-- tz-ok: <reason>`. Reads models/ only; no dbt, no credentials.
       - name: Check timezone conventions
@@ -56,33 +64,26 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-      - name: Prepare dbt for templating (deps only)
+      - name: Install offline SQL lint dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements.txt sqlfluff==3.4.2
           dbt deps
-      # The steps of pre-commit/action@v3.0.1, inlined: it embeds actions/cache@v4 (Node 20).
-      - name: Install pre-commit
-        run: python -m pip install pre-commit
-      - uses: actions/cache@v5
-        with:
-          path: ~/.cache/pre-commit
-          key: pre-commit-3|${{ env.pythonLocation }}|${{ hashFiles('.pre-commit-config.yaml') }}
-      - name: Run pre-commit (lint only)
-        run: pre-commit run --show-diff-on-failure --color=always --hook-stage manual --all-files
+      - name: Lint enabled model SQL without BigQuery credentials
+        run: bash scripts/lint_ci_sql.sh
         env:
-          # yamllint has its own job
-          SKIP: yamllint
-          # Ensure sqlfluff's dbt templater can resolve a profile without real credentials
-          DBT_TARGET: ci
-          DBT_PROFILES_DIR: ./profiles
+          # dbt ls parses the profile and project locally.
           DBT_GCP_PROJECT_CI: lint-ci
           DBT_BQ_DATASET: lint_ci
           DBT_BQ_LOCATION: US
+          DBT_SEND_ANONYMOUS_USAGE_STATS: 'false'
+      - name: Test offline SQL lint with enabled models
+        run: bash scripts/tests/test_sqlfluff_ci.sh
 
   bigquery-ci:
     needs: [lint, yamllint]
     runs-on: ubuntu-latest
+    env:
+      DBT_BQ_LOCATION: ${{ secrets.BQ_LOCATION || 'US' }}
     permissions:
       id-token: write
       contents: read
@@ -118,7 +119,7 @@ jobs:
           echo "DBT_GCP_PROJECT_CI=${{ secrets.GCP_PROJECT_CI }}" >> $GITHUB_ENV
           echo "DBT_ARTIFACTS_BUCKET=${{ secrets.DBT_ARTIFACTS_BUCKET }}" >> $GITHUB_ENV
           echo "DBT_USER=ci_${{ github.actor }}" >> $GITHUB_ENV
-          echo "DBT_BQ_DATASET=ci_pr_${{ github.event.number }}_${{ github.run_id }}" >> $GITHUB_ENV
+          echo "DBT_BQ_DATASET=ci_pr_${{ github.event.number }}_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}" >> $GITHUB_ENV
           echo "DBT_GCP_PROJECT_PROD=${{ secrets.GCP_PROJECT_PROD }}" >> $GITHUB_ENV
           echo "DBT_BQ_DATASET_PROD=${{ secrets.PROD_DATASET }}" >> $GITHUB_ENV
           echo "DIFF_LIMIT=200" >> $GITHUB_ENV
@@ -132,11 +133,16 @@ jobs:
           # Ensure dbt-bigquery (profiles.ci) finds the credentials file minted by auth step
           echo "GOOGLE_APPLICATION_CREDENTIALS=${{ steps.auth.outputs.credentials_file_path }}" >> $GITHUB_ENV
 
+      - name: Install dbt packages
+        run: dbt deps
+
       # Docs/config-only PRs (HAS_MODEL_CHANGES=false) only run `dbt parse`, so they
       # skip every step that touches BigQuery (#29).
       - name: Create ephemeral dataset
         if: ${{ env.HAS_MODEL_CHANGES != 'false' }}
-        run: bash scripts/create_bq_dataset.sh
+        run: |
+          dbt parse --target ci
+          bash scripts/create_bq_dataset.sh
 
       - name: Slim CI build (with defer if prod manifest exists)
         id: dbt_build
@@ -194,17 +200,19 @@ jobs:
           else
             # Verify the CI identity can list the bucket; if not, print guidance and skip.
             if ! gsutil ls "gs://${DBT_ARTIFACTS_BUCKET}/" >/dev/null 2>&1; then
-              echo "[warn] CI does not have list access to gs://${DBT_ARTIFACTS_BUCKET}/" >&2
-              echo "       Grant roles/storage.objectAdmin to ${CI_SA_EMAIL} on this bucket or run infra/10-bootstrap.sh" >&2
+              echo "[warn] CI could not list gs://${DBT_ARTIFACTS_BUCKET}/" >&2
+              echo "       Run infra/10-bootstrap.sh to verify CI artifact access." >&2
               exit 0
             fi
+            artifact_uri="gs://${DBT_ARTIFACTS_BUCKET}/ci/pr-${{ github.event.number }}-${{ github.run_id }}"
+            # Composite uploads can create temporary objects outside ci/.
             if [[ -d ./target ]]; then
-              gsutil -m rsync -r ./target "gs://${DBT_ARTIFACTS_BUCKET}/ci/pr-${{ github.event.number }}-${{ github.run_id }}/"
+              gsutil -o GSUtil:parallel_composite_upload_threshold=0 -m rsync -r ./target "${artifact_uri}/"
             else
               echo "No ./target directory found; skipping docs rsync"
             fi
             if [[ -f target/manifest.json ]]; then
-              gsutil cp target/manifest.json "gs://${DBT_ARTIFACTS_BUCKET}/ci/pr-${{ github.event.number }}-${{ github.run_id }}/manifest.json"
+              gsutil -o GSUtil:parallel_composite_upload_threshold=0 cp target/manifest.json "${artifact_uri}/manifest.json"
             else
               echo "No target/manifest.json found; skipping manifest upload"
             fi
