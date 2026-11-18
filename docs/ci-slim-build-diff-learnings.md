@@ -30,13 +30,13 @@ positive and how to keep them out of the signal.
   no leading `+`, so ancestors defer). These are **identical**, so build and diff cover the same
   models.
 - `NEEDS_FALLBACK` — true for macro / `dbt_project.yml` / `packages.yml` / `package-lock.yml` /
-  `dependencies.yml` / yaml-only changes that can't be scoped by filename.
+  `dependencies.yml` / resource YAML changes that can't be scoped by filename, even alongside a SQL edit.
 - `FULL_BUILD` — true for `requirements.txt` or `profiles/` changes. A dbt-core or adapter bump
   leaves the manifest unchanged, so `state:modified+` selects nothing (checked: a 1.10.8 manifest
   vs a 1.10.10 run selects zero nodes); only a full build exercises it.
 
 `scripts/ci_build.sh` consumes these: git-diff-scoped build for model changes; a combined
-`"$BUILD_SELECT state:modified+"` tier when a macro/config change accompanies model changes;
+`"$BUILD_SELECT state:modified+"` tier when a macro/config/YAML change accompanies model changes;
 `state:modified+` for macro/config/yaml-only; and a full build when no prod manifest exists or
 `FULL_BUILD` is true.
 
@@ -98,8 +98,8 @@ diff/comment steps (which gate on model-build success only).
 
 ## Known limitations (accepted)
 
-- **Macro+model PRs: build ⊋ diff.** The build unions `state:modified+` for macro coverage, but the
-  diff uses the git scope only — macro-affected models are built but not diffed.
+- **Mixed changes: build ⊋ diff.** The build unions `state:modified+` for macro and resource YAML coverage.
+  The diff uses the git scope only.
 - **Fallback path is manifest-dependent.** Model-change PRs are manifest-independent for build
   scoping; macro/config/yaml-only PRs still use `state:modified+` and can over-select if the prod
   manifest is stale.
