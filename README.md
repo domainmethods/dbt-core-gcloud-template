@@ -593,10 +593,9 @@ Note on INT_DATASET:
 
 ## Release (main → prod container)
 
-Enable branch protection or an active ruleset for `main` before using the release
-workflow. The workflow queues production releases through execution and applies a
-candidate only if its SHA still matches the protected branch immediately before
-the job update. Every push to `main` triggers a release so the current head can deploy.
+The workflow queues production releases through execution. It applies a candidate
+only if its SHA still matches `main` immediately before the job update. Every push
+to `main` triggers a release so the current head can deploy.
 
 **Secrets required**
 

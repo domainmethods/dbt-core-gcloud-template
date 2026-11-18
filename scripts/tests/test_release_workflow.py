@@ -146,8 +146,13 @@ jq -r "$4" <<<"$MAIN_BRANCH"
                 self.assertTrue(commands[1].startswith("gh api repos/owner/repo/branches/main "), commands)
                 self.assertTrue(commands[2].startswith(f"gcloud run jobs {action} "), commands)
 
-    def test_unprotected_or_unreadable_main_blocks_mutation(self):
-        unverified = ({"protected": False}, {"GH_FAIL": "1"}, {"main_sha": ""})
+    def test_current_main_sha_is_eligible_with_any_branch_protection_setting(self):
+        result = self.step(APPLY, protected=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.output.read_text(), "applied=true\n")
+
+    def test_unreadable_main_blocks_mutation(self):
+        unverified = ({"GH_FAIL": "1"}, {"main_sha": ""})
         for env in unverified:
             with self.subTest(env=env):
                 self.calls.write_text("")
