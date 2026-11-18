@@ -1,0 +1,11 @@
+.gcloudignore
+.git
+.gitignore
+
+# The viewer is submitted as a separate Cloud Build context.
+.env
+.envrc
+.direnv/
+infra/
+keyfile.json
+secrets/
