@@ -109,13 +109,7 @@ if [[ "${GENERATE_DOCS:-false}" == "true" && "${BUILD_EXIT}" -eq 0 ]]; then
   if [[ "${DOCS_EXIT}" -ne 0 ]]; then
     echo "dbt docs generate failed (exit ${DOCS_EXIT}); skipping docs upload" >&2
   else
-    echo "Docs generated at ./target/index.html"
-    # Prefer DBT_DOCS_BUCKET; fall back to DBT_ARTIFACTS_BUCKET if not set
-    EXPORT_DOCS_BUCKET="${DBT_DOCS_BUCKET:-${DBT_ARTIFACTS_BUCKET:-}}"
-    if [[ -n "${EXPORT_DOCS_BUCKET}" ]]; then
-      echo "Uploading docs to gs://${EXPORT_DOCS_BUCKET}/index.html"
-      python scripts/lib/upload_docs.py || DOCS_EXIT=$?
-    fi
+    python scripts/lib/upload_docs.py || DOCS_EXIT=$?
   fi
 fi
 

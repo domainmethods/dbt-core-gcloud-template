@@ -349,7 +349,7 @@ dbt test
 
 # Generate docs locally
 dbt docs generate --static
-# Open target/index.html in browser
+# Open target/static_index.html in browser
 
 # Check data freshness
 dbt source freshness
@@ -507,7 +507,7 @@ DBT_BQ_LOCATION=US
 
 ```bash
 dbt docs generate --static
-# then open target/index.html
+# then open target/static_index.html
 ```
 
 > The `--static` flag produces a single HTML doc you can host or share easily (no extra assets). See community write‑ups on hosting dbt docs as a static site. ([Hiflylabs][4], [Metaplane][5])
@@ -611,7 +611,7 @@ Runtime defaults (Cloud Run Job):
 
 * Runs `dbt build` then `dbt source freshness` by default in prod (set `RUN_FRESHNESS=false` to disable, or scope with `FRESHNESS_SELECT`).
 * Uploads `manifest.json`, `run_results.json`, and `sources.json` to `gs://$DBT_ARTIFACTS_BUCKET/prod/`. A failed build, freshness check or docs step still uploads `run_results.json` and `sources.json` and then exits non-zero. `manifest.json` is replaced whenever every model, seed and snapshot built, even if data tests failed. The last uploaded one is kept (CI defers against it) when a model, seed or snapshot errored or was skipped, when the build's `run_results.json` is missing, or when `dbt build` exits 2 or higher. The job log says which case applied.
-* Optionally generates docs (`GENERATE_DOCS=true`) and uploads `target/index.html` to `gs://$DBT_DOCS_BUCKET/index.html` (falls back to `DBT_ARTIFACTS_BUCKET` if `DBT_DOCS_BUCKET` is unset).
+* Optionally generates docs (`GENERATE_DOCS=true`) and uploads `target/static_index.html` to `gs://$DBT_DOCS_BUCKET/index.html` (falls back to `DBT_ARTIFACTS_BUCKET` if `DBT_DOCS_BUCKET` is unset).
 
 > Cloud Run **Jobs** are built for batch/ETL: they run to completion and can be executed on a schedule by Cloud Scheduler without standing up servers.
 
@@ -838,7 +838,7 @@ This means the operator does not have permission to modify dataset IAM. Options:
 
 ## Serve dbt Docs (HTTP)
 
-The job can generate a single-file site (`target/index.html`) via `dbt docs generate --static` and upload it to the docs bucket. You have a few options to view it over HTTP:
+The job can generate a single-file site (`target/static_index.html`) via `dbt docs generate --static` and upload it to the docs bucket as `index.html`. You have a few options to view it over HTTP:
 
 * Option A — Simple public website (fastest)
   * Make the docs bucket a static website and grant public read.
@@ -884,7 +884,7 @@ Runtime envs:
 
 Automatic upload on prod runs:
 
-* If the prod job sets `GENERATE_DOCS=true` and `DBT_DOCS_BUCKET=<bucket>`, the dbt container uploads `target/index.html` to `gs://<bucket>/index.html` automatically after generation.
+* If the prod job sets `GENERATE_DOCS=true` and `DBT_DOCS_BUCKET=<bucket>`, the dbt container uploads `target/static_index.html` to `gs://<bucket>/index.html` automatically after generation.
 
 ---
 
