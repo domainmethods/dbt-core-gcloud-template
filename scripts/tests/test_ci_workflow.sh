@@ -41,7 +41,7 @@ assert_eq "$(wf "any('yamllint' in s.get('run', '') for s in w['jobs']['lint']['
 echo "scenario 3: the warehouse job uses the configured BigQuery location (#97)"
 assert_eq "$(wf "w['jobs']['bigquery-ci'].get('env', {}).get('DBT_BQ_LOCATION')")" \
   "\${{ secrets.BQ_LOCATION || 'US' }}" "warehouse job resolves BQ_LOCATION with a US default"
-assert_eq "$(wf "w['jobs']['lint']['steps'][-1]['env']['DBT_BQ_LOCATION']")" "US" \
+assert_eq "$(wf "next(s for s in w['jobs']['lint']['steps'] if s.get('run') == 'bash scripts/lint_ci_sql.sh')['env']['DBT_BQ_LOCATION']")" "US" \
   "SQLFluff still uses the offline US lint profile"
 profile_location=$(python3 -c 'import sys, yaml
 print(yaml.safe_load(open(sys.argv[1]))["dbt_gcloud"]["outputs"]["ci"]["location"])' "$REPO_ROOT/profiles/profiles.yml")

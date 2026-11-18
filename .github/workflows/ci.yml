@@ -68,6 +68,7 @@ jobs:
           # dbt ls parses the profile and project locally.
           DBT_GCP_PROJECT_CI: lint-ci
           DBT_BQ_DATASET: lint_ci
+          DBT_BQ_LOCATION: US
           DBT_SEND_ANONYMOUS_USAGE_STATS: 'false'
       - name: Test offline SQL lint with enabled models
         run: bash scripts/tests/test_sqlfluff_ci.sh
