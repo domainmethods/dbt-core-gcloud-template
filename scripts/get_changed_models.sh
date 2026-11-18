@@ -7,7 +7,7 @@ set -euo pipefail
 # Outputs (to $GITHUB_ENV/$GITHUB_OUTPUT if available, else stdout):
 #   HAS_MODEL_CHANGES=true|false
 #   CHANGED_MODELS=<space-separated changed node names (models/seeds/snapshots)>
-#   DIFF_SELECT=<space-separated 'name+' selector tokens>
+#   DIFF_SELECT=<space-separated downstream selector tokens>
 #   BUILD_SELECT=<same value as DIFF_SELECT>
 #   NEEDS_FALLBACK=true|false  (a change couldn't be scoped by filename; caller
 #                               should fall back to state:modified+)
@@ -32,19 +32,20 @@ CHANGED_NODES=""
 MACRO_OR_CONFIG=false
 YAML_CHANGED=false
 FULL_BUILD=false
+BUILD_SELECT=""
 
 while IFS= read -r file; do
   [[ -z "$file" ]] && continue
   case "$file" in
-    models/*.sql)
+    models/*.sql|models/*.py|seeds/*.csv|snapshots/*.sql)
       HAS_MODEL_CHANGES=true
-      CHANGED_NODES="${CHANGED_NODES} $(basename "$file" .sql)" ;;
-    seeds/*.csv)
-      HAS_MODEL_CHANGES=true
-      CHANGED_NODES="${CHANGED_NODES} $(basename "$file" .csv)" ;;
-    snapshots/*.sql)
-      HAS_MODEL_CHANGES=true
-      CHANGED_NODES="${CHANGED_NODES} $(basename "$file" .sql)" ;;
+      filename=${file##*/}
+      node=${filename%.*}
+      selector=$node
+      # Versioned Python nodes can have a different name from the defining file.
+      if [[ "$file" == *.py ]]; then selector="path:$file"; fi
+      CHANGED_NODES+=" $node"
+      BUILD_SELECT+=" ${selector}+" ;;
     models/*.yml|models/*.yaml|seeds/*.yml|seeds/*.yaml|snapshots/*.yml|snapshots/*.yaml)
       HAS_MODEL_CHANGES=true
       YAML_CHANGED=true ;;
@@ -64,12 +65,8 @@ done <<< "$CHANGED_FILES"
 
 CHANGED_NODES=$(echo "$CHANGED_NODES" | xargs)  # trim/normalize whitespace
 
-# BUILD_SELECT == DIFF_SELECT: one 'name+' token per changed node (model + downstream;
+# BUILD_SELECT == DIFF_SELECT: one selector per changed node (model + downstream;
 # no leading '+' so unchanged ancestors defer to prod). Empty for docs/macro/config-only.
-BUILD_SELECT=""
-for node in ${CHANGED_NODES}; do
-  BUILD_SELECT="${BUILD_SELECT} ${node}+"
-done
 BUILD_SELECT=$(echo "$BUILD_SELECT" | xargs)
 DIFF_SELECT="$BUILD_SELECT"
 

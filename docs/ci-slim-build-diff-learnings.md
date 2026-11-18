@@ -26,9 +26,9 @@ positive and how to keep them out of the signal.
 `scripts/get_changed_models.sh` derives the scope from the **git diff**, emitting:
 
 - `HAS_MODEL_CHANGES` — false for docs/config-only PRs.
-- `DIFF_SELECT` / `BUILD_SELECT` — `name+` per changed model/seed/snapshot (model + downstream;
-  no leading `+`, so ancestors defer). These are **identical**, so build and diff cover the same
-  models.
+- `DIFF_SELECT` / `BUILD_SELECT` — `name+` per changed SQL model, seed, or snapshot, and
+  `path:models/.../model.py+` per changed Python model so versioned nodes resolve by file.
+  Both use the same downstream selectors. With no leading `+`, unchanged ancestors defer.
 - `NEEDS_FALLBACK` — true for macro / `dbt_project.yml` / `packages.yml` / `package-lock.yml` /
   `dependencies.yml` / yaml-only changes that can't be scoped by filename.
 - `FULL_BUILD` — true for `requirements.txt` or `profiles/` changes. A dbt-core or adapter bump
