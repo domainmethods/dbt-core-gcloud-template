@@ -451,7 +451,7 @@ Core flow (typical first run):
 Optional helpers (as needed):
 
 * [infra/50-ensure-dev-datasets.sh](#developer-onboarding) — Ensure per‑developer datasets + IAM (reads infra/devs.txt; supports --grant-job-user).
-* [infra/70-configure-docs-website.sh](#serve-dbt-docs-http) — Configure docs bucket website index; set PUBLIC=true for public read.
+* [infra/70-configure-docs-website.sh](#serve-dbt-docs-http) — Configure the docs website index and optionally grant public access to a dedicated docs bucket.
 * [infra/80-deploy-docs-viewer.sh](#docs-viewer-cloud-run-iam-only) — Deploy private Cloud Run docs viewer service (reads index.html from GCS).
 * [infra/81-grant-docs-viewer-access.sh](#docs-viewer-cloud-run-iam-only) — Grant run.invoker to users/groups for the docs viewer.
 * [infra/85-ensure-notification-channels.sh](#monitoring) — Create/reuse Monitoring email channels; writes NOTIFICATION_CHANNELS.
@@ -841,7 +841,9 @@ This means the operator does not have permission to modify dataset IAM. Options:
 The job can generate a single-file site (`target/index.html`) via `dbt docs generate --static` and upload it to the docs bucket. You have a few options to view it over HTTP:
 
 * Option A — Simple public website (fastest)
-  * Make the docs bucket a static website and grant public read.
+  * Set `DBT_DOCS_BUCKET` to a dedicated bucket containing only docs intended for public access.
+  * Set `DBT_ARTIFACTS_BUCKET` to a different bucket. An empty value defaults to the docs bucket.
+  * Update the bootstrap and deployment configuration to use those buckets before enabling public access.
   * Configure and print URL:
     * `(cd infra && PUBLIC=true ./70-configure-docs-website.sh)`
     * Then open: `https://storage.googleapis.com/${DBT_DOCS_BUCKET}/index.html`
