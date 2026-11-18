@@ -54,7 +54,8 @@ JSON
 run_script
 jq -e --slurpfile before "$SANDBOX/bucket.json" '
   .lifecycle.rule == ($before[0].lifecycle.rule[:2] +
-    [{"action":{"type":"Delete"},"condition":{"age":30,"matchesPrefix":["ci/"]}}])
+    [{"action":{"type":"Delete"},"condition":{"age":30,"matchesPrefix":["ci/"]}},
+     {"action":{"type":"Delete"},"condition":{"age":30,"matchesPrefix":["prod/runs/"]}}])
 ' "$SANDBOX/patch.json" > /dev/null
 grep -Fqx 'PATCH https://storage.googleapis.com/storage/v1/b/shared-bucket?ifMetagenerationMatch=7' "$SANDBOX/calls.log"
 
@@ -72,7 +73,18 @@ fi
 
 echo '{"name":"shared-bucket","metageneration":"8"}' > "$SANDBOX/bucket.json"
 run_script
-jq -e '.lifecycle.rule == [{"action":{"type":"Delete"},"condition":{"age":30,"matchesPrefix":["ci/"]}}]' "$SANDBOX/patch.json" > /dev/null
+jq -e '.lifecycle.rule == [{"action":{"type":"Delete"},"condition":{"age":30,"matchesPrefix":["ci/"]}},
+  {"action":{"type":"Delete"},"condition":{"age":30,"matchesPrefix":["prod/runs/"]}}]' "$SANDBOX/patch.json" > /dev/null
+
+# A bucket configured before prod/runs/ diagnostics existed gains only the new rule.
+cat > "$SANDBOX/bucket.json" <<'JSON'
+{"name":"shared-bucket","metageneration":"9","lifecycle":{"rule":[
+  {"action":{"type":"Delete"},"condition":{"age":30,"matchesPrefix":["ci/"]}}
+]}}
+JSON
+run_script
+jq -e '.lifecycle.rule == [{"action":{"type":"Delete"},"condition":{"age":30,"matchesPrefix":["ci/"]}},
+  {"action":{"type":"Delete"},"condition":{"age":30,"matchesPrefix":["prod/runs/"]}}]' "$SANDBOX/patch.json" > /dev/null
 
 echo '{"name":"shared-bucket"}' > "$SANDBOX/bucket.json"
 if run_script > "$SANDBOX/output" 2>&1; then
