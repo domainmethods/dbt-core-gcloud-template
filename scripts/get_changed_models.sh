@@ -29,8 +29,7 @@ echo "$CHANGED_FILES" | sed 's/^/  /'
 # Categorize changed files; collect buildable node names (models, seeds, snapshots).
 HAS_MODEL_CHANGES=false
 CHANGED_NODES=""
-MACRO_OR_CONFIG=false
-YAML_CHANGED=false
+NEEDS_FALLBACK=false
 FULL_BUILD=false
 
 while IFS= read -r file; do
@@ -46,14 +45,15 @@ while IFS= read -r file; do
       HAS_MODEL_CHANGES=true
       CHANGED_NODES="${CHANGED_NODES} $(basename "$file" .sql)" ;;
     models/*.yml|models/*.yaml|seeds/*.yml|seeds/*.yaml|snapshots/*.yml|snapshots/*.yaml)
+      # YAML can configure nodes outside any filename-derived selector.
       HAS_MODEL_CHANGES=true
-      YAML_CHANGED=true ;;
+      NEEDS_FALLBACK=true ;;
     # Singular/generic tests and analyses can't be scoped by filename either.
     # package-lock.yml / dependencies.yml move package versions (and their macros),
     # which state:modified+ picks up through the nodes that use them.
     macros/*.sql|tests/*|analyses/*|dbt_project.yml|packages.yml|package-lock.yml|dependencies.yml)
       HAS_MODEL_CHANGES=true
-      MACRO_OR_CONFIG=true ;;
+      NEEDS_FALLBACK=true ;;
     # A dbt-core/adapter bump or profile change alters how every node builds, but the
     # manifest doesn't change, so state:modified+ selects nothing. Only a full build tests it.
     requirements.txt|profiles/*)
@@ -72,12 +72,6 @@ for node in ${CHANGED_NODES}; do
 done
 BUILD_SELECT=$(echo "$BUILD_SELECT" | xargs)
 DIFF_SELECT="$BUILD_SELECT"
-
-# Fallback needed when a change can't be scoped by filename: macros/config/tests/analyses affect any model;
-# a yaml-only change (no node) can alter tests/configs on any model.
-NEEDS_FALLBACK=false
-if [[ "$MACRO_OR_CONFIG" == "true" ]]; then NEEDS_FALLBACK=true; fi
-if [[ "$YAML_CHANGED" == "true" && -z "$CHANGED_NODES" ]]; then NEEDS_FALLBACK=true; fi
 
 echo ""
 echo "HAS_MODEL_CHANGES=${HAS_MODEL_CHANGES}"
