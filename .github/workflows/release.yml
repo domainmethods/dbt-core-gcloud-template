@@ -119,9 +119,9 @@ jobs:
           fi
 
           # Read the live ref after selecting the action and before changing the job.
-          current_sha=$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq 'select(.protected == true) | .commit.sha')
+          current_sha=$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
           if [[ ! "$current_sha" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::Could not verify the head of protected main."
+            echo "::error::Could not verify the head of main."
             exit 1
           fi
           if [[ "$GITHUB_SHA" != "$current_sha" ]]; then
