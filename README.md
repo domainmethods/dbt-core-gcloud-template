@@ -85,6 +85,8 @@ $EDITOR infra/.env   # Set PROJECT_ID, REGION, GITHUB_REPO, etc.
 
 #### Step 3: Configure GitHub Integration
 
+Configure the GitHub `production` environment and its deployment branch policy before running the WIF setup.
+
 ```bash
 (cd infra && ./20-wif-github.sh)      # Set up OIDC
 (cd infra && ./25-set-github-secrets.sh)  # Auto-configure repo secrets
@@ -645,10 +647,14 @@ Key env toggles (`infra/.env`):
 
 3. Configure GitHub **OIDC / Workload Identity Federation** (no keys):
 
+Install and sign in to `gh`. In GitHub, create the `production` environment and select only the `main` branch for deployments. The protected-branches policy also works when `main` is protected.
+
 ```bash
 (cd infra && ./20-wif-github.sh)
 ```
 
+* Use a dedicated `github-pool` with only the template's GitHub provider. CI retains repository scope. The production binding requires a push to `main` in this repository's `.github/workflows/release.yml` with the `production` environment.
+* For existing installs, rerun this script to replace the old repository-wide grant on the production service account. The GitHub provider secret stays the same.
 * Put the printed `workload_identity_provider` and `service_account` into GitHub Secrets (`GCP_WIF_PROVIDER`, `GCP_CI_SA_EMAIL`).
 * We rely on the official `google-github-actions/auth` Action; OIDC requires `permissions: id-token: write` in the workflow.
 
