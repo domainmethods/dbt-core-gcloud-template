@@ -51,6 +51,25 @@ printf 'gcloud %s\n' "$*" >> "$CALLS"
 if [[ "$* " == "run jobs describe "* ]]; then
   exit "${DESCRIBE_STATUS:-0}"
 fi
+if [[ -n "${JOB_ENV_STATE:-}" && "$1 $2" == "run jobs" && ( "$3" == create || "$3" == update ) ]]; then
+  while (($#)); do
+    case "$1" in
+      --set-env-vars|--update-env-vars)
+        jq --arg verb "$1" --arg raw "$2" '
+          ($raw | split(",") | map(capture("^(?<key>[^=]+)=(?<value>.*)$")) | from_entries) as $changes
+          | if $verb == "--set-env-vars" then $changes else . + $changes end
+        ' "$JOB_ENV_STATE" > "$JOB_ENV_STATE.tmp"
+        mv "$JOB_ENV_STATE.tmp" "$JOB_ENV_STATE"
+        shift
+        ;;
+      --env-vars-file)
+        cp "$2" "$JOB_ENV_STATE"
+        shift
+        ;;
+    esac
+    shift
+  done
+fi
 """,
         )
         self.stub(
@@ -141,6 +160,57 @@ jq -r "$4" <<<"$MAIN_BRANCH"
             self.assertEqual(STEPS[name]["if"], "steps.apply.outputs.applied == 'true'")
         self.assertIn("--wait", STEPS[EXECUTE]["run"])
         self.assertNotIn("paths-ignore", WORKFLOW[True]["push"])
+
+    def test_update_preserves_operator_settings_and_advances_workflow_owned_values(self):
+        operator_env = {
+            "DBT_MAX_BYTES_BILLED": "50000000000",
+            "DBT_BQ_PRIORITY": "batch",
+            "DBT_JOB_EXECUTION_TIMEOUT_SEC": "600",
+            "RUN_FRESHNESS": "false",
+            "FRESHNESS_SELECT": "source:source_data",
+            "GENERATE_DOCS": "false",
+            "RUN_PRE_HOOK": "true",
+            "RUN_POST_HOOK": "true",
+            "API_KEY": {"valueSource": {"secretKeyRef": {"secret": "api-key", "version": "1"}}},
+        }
+        state = self.root / "existing.json"
+        state.write_text(json.dumps({"DBT_BQ_DATASET_PROD": "old_dataset", **operator_env}))
+        self.secrets.update(GENERATE_DOCS="true", RUN_FRESHNESS="true", DBT_MAX_BYTES_BILLED="90000000000")
+
+        result = self.step(APPLY, JOB_ENV_STATE=str(state))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        updated = json.loads(state.read_text())
+        self.assertEqual({key: updated.get(key) for key in operator_env}, operator_env)
+        self.assertEqual(updated["DBT_BQ_DATASET_PROD"], "analytics")
+        update = self.calls.read_text().splitlines()[-1]
+        for flag in ("--service-account", "--task-timeout", "--set-secrets", "--clear-secrets"):
+            self.assertNotIn(flag, update)
+
+    def test_create_uses_first_release_configuration_and_defaults(self):
+        state = self.root / "created.yaml"
+        for config in (
+            {},
+            {
+                "GENERATE_DOCS": "false",
+                "RUN_FRESHNESS": "false",
+                "FRESHNESS_SELECT": "source:raw,tag:fresh",
+                "DBT_MAX_BYTES_BILLED": "5000000000000",
+                "DBT_BQ_PRIORITY": "batch",
+                "DBT_JOB_EXECUTION_TIMEOUT_SEC": "600",
+            },
+        ):
+            with self.subTest(config=config):
+                state.write_text("{}")
+                self.secrets.update(config)
+                result = self.step(APPLY, DESCRIBE_STATUS="1", JOB_ENV_STATE=str(state))
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                created = yaml.safe_load(state.read_text())
+                expected = {"GENERATE_DOCS": "true", "RUN_FRESHNESS": "true", "DBT_BQ_PRIORITY": "interactive"}
+                expected.update(config)
+                self.assertEqual({key: created.get(key) for key in expected}, expected)
+                self.assertEqual(created["DBT_BQ_DATASET_PROD"], "analytics")
 
 
 if __name__ == "__main__":

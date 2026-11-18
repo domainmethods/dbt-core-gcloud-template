@@ -612,6 +612,17 @@ the job update. Every push to `main` triggers a release so the current head can 
 3. Create/update **Cloud Scheduler** trigger on the job (“Triggers” tab in the Job UI), or via CLI, to run on a cron schedule.
 4. (Optional) Execute once after deploy to refresh prod artifacts.
 
+Releases update the image, dbt target and profiles path, CI mode, BigQuery
+coordinates, and artifact/docs bucket names. Configure runtime settings such as
+query limits, freshness, docs, hooks and secret references on the Cloud Run job
+after creation. A release retains those settings.
+
+For the first release, run `infra/25-set-github-secrets.sh` after editing
+`infra/.env`, or set the corresponding GitHub Actions secrets manually
+(`GENERATE_DOCS`, `RUN_FRESHNESS`, `FRESHNESS_SELECT`, `DBT_MAX_BYTES_BILLED`,
+`DBT_BQ_PRIORITY`, and `DBT_JOB_EXECUTION_TIMEOUT_SEC`). Job creation reads these
+values. Empty settings use the documented defaults.
+
 Runtime defaults (Cloud Run Job):
 
 * Runs `dbt build` then `dbt source freshness` by default in prod (set `RUN_FRESHNESS=false` to disable, or scope with `FRESHNESS_SELECT`).
