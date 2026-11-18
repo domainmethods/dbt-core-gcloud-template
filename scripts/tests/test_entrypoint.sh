@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tests for entrypoint.sh — a failed `dbt build` or `dbt source freshness` must
 # still emit the summary and upload run_results.json (#20), the uploaded
-# run_results.json must be the build's and not `docs generate`'s, and the job
+# run_results.json and manifest.json must come from the build, and the job
 # must still exit non-zero with the first failing step's code.
 #
 # Dependency-free: bash, python3, coreutils. Stubs `dbt` on PATH and
@@ -18,37 +18,81 @@ assert_contains(){ [[ "$1" == *"$2"* ]] && pass "$3" || fail "$3 (missing '$2')"
 assert_file(){ [[ -f "$1" ]] && pass "$2" || fail "$2 (no $1)"; }
 assert_no_file(){ [[ ! -f "$1" ]] && pass "$2" || fail "$2 ($1 exists)"; }
 
-# Each dbt subcommand writes a run_results.json that names it, so the test can
-# tell which step's file was uploaded. STUB_BUILD_EXIT / STUB_FRESHNESS_EXIT
-# make a step fail after writing its artifacts, as real dbt does.
+# Freshness and docs reparse without the build's --vars and overwrite the manifest.
+# Docs also overwrites run_results.json with its own results.
 read -r -d '' STUB_DBT <<'SH' || true
 #!/usr/bin/env bash
 mkdir -p target
 args=" $* "
 case "$args" in
   *" docs generate "*)
+    if [[ "${STUB_DOCS_MISSING_STATIC:-false}" != "true" ]]; then
+      cat > target/static_index.html <<'HTML'
+<script>
+const manifest = {"nodes":{"model.p.a":{"alias":"a"}}};
+const catalog = {"nodes":{"model.p.a":{"columns":{"id":{"name":"id"}}}}};
+</script>
+HTML
+    fi
     echo '{"written_by": "docs", "results": []}' > target/run_results.json
+    echo '{"nodes": {"model.p.a": {"alias": "a"}}, "written_by": "docs"}' > target/manifest.json
     echo '<html>docs</html>' > target/index.html
     exit "${STUB_DOCS_EXIT:-0}" ;;
   *" source freshness "*)
     echo '{"sources": [{"status": "pass"}]}' > target/sources.json
+    echo '{"nodes": {"model.p.a": {"alias": "a"}}, "written_by": "freshness"}' > target/manifest.json
     exit "${STUB_FRESHNESS_EXIT:-0}" ;;
   *" build "*)
-    echo '{"written_by": "build"}' > target/manifest.json
-    m='{"unique_id": "model.p.a", "status": "success"}'
-    t='{"unique_id": "test.p.t", "status": "pass"}'
+    model_alias=a
+    if [[ "$args" == *' --vars {"alias":"build_alias"} '* ]]; then
+      model_alias=build_alias
+    fi
+    if [[ "${STUB_BUILD_MODE:-}" != missing_manifest ]]; then
+      cat > build-manifest.json <<JSON
+{
+  "nodes": {
+    "model.p.a": {"resource_type": "model", "alias": "$model_alias", "config": {"enabled": true, "materialized": "view"}},
+    "model.p.b": {"resource_type": "model", "config": {"enabled": true, "materialized": "table"}},
+    "seed.p.lookup": {"resource_type": "seed", "config": {"enabled": true, "materialized": "seed"}},
+    "snapshot.p.history": {"resource_type": "snapshot", "config": {"enabled": true, "materialized": "snapshot"}},
+    "model.p.inline": {"resource_type": "model", "config": {"enabled": true, "materialized": "ephemeral"}},
+    "test.p.t": {"resource_type": "test", "config": {"enabled": true}}
+  },
+  "disabled": {
+    "model.p.disabled": [{"resource_type": "model", "config": {"enabled": false, "materialized": "table"}}]
+  }
+}
+JSON
+      cp build-manifest.json target/manifest.json
+    fi
     case "${STUB_BUILD_MODE:-}" in
-      crash)  # parse/compile error: dbt raises before writing run_results.json
-        rm -f target/run_results.json
+      crash|missing_results)
         exit "${STUB_BUILD_EXIT:-0}" ;;
-      test_fail)  # every model built, a data test failed
-        t='{"unique_id": "test.p.t", "status": "fail"}' ;;
-      *)
-        if [[ "${STUB_BUILD_EXIT:-0}" != "0" ]]; then  # a model errored, its child skipped
-          m='{"unique_id": "model.p.a", "status": "error"}, {"unique_id": "model.p.b", "status": "skipped"}'
-        fi ;;
+      bad_manifest)
+        echo '{' > target/manifest.json ;;
     esac
-    echo "{\"written_by\": \"build\", \"results\": [$m, $t]}" > target/run_results.json
+    results=()
+    for uid in model.p.a model.p.b seed.p.lookup snapshot.p.history test.p.t; do
+      name="${uid##*.}"
+      [[ "$args" == *" --exclude $name "* ]] && continue
+      status=success
+      relation="$name"
+      case "$uid" in
+        model.p.a) relation="$model_alias" ;;
+        test.p.t) status=pass ;;
+      esac
+      if [[ "${STUB_BUILD_MODE:-}" == test_fail ]]; then
+        [[ "$uid" == test.p.t ]] && status=fail
+      elif [[ "${STUB_BUILD_EXIT:-0}" != 0 ]]; then
+        case "$uid" in
+          model.p.a) status=error ;;
+          model.p.b) status=skipped ;;
+        esac
+      fi
+      results+=("$(printf '{"unique_id": "%s", "status": "%s", "relation_name": "db.analytics.%s"}' "$uid" "$status" "$relation")")
+    done
+    IFS=,
+    printf '{"written_by": "build", "results": [%s]}\n' "${results[*]}" > target/run_results.json
     exit "${STUB_BUILD_EXIT:-0}" ;;
 esac
 exit 0
@@ -106,12 +150,53 @@ run_entrypoint(){
   RC=$?
 }
 
-echo "scenario: green build → uploads are the build's, not docs generate's"
-run_entrypoint 0 0
+echo "scenario: full build with alias override → upload the manifest and results from that build"
+run_entrypoint 0 0 'DBT_BUILD_ARGS=--vars {"alias":"build_alias"}'
 assert_eq "$RC" "0" "exits 0"
 assert_contains "$(cat "$SANDBOX/uploads/artifacts/prod/run_results.json" 2>/dev/null)" '"written_by": "build"' "uploaded run_results.json is the build's"
-assert_file "$SANDBOX/uploads/artifacts/prod/manifest.json" "manifest.json uploaded"
+assert_contains "$(cat "$SANDBOX/uploads/artifacts/prod/run_results.json" 2>/dev/null)" '"relation_name": "db.analytics.build_alias"' "build results record the overridden alias"
+cmp -s "$SANDBOX/build-manifest.json" "$SANDBOX/uploads/artifacts/prod/manifest.json" \
+  && pass "manifest upload matches the build output" || fail "manifest upload differs from the build output"
+assert_contains "$(cat "$SANDBOX/target/manifest.json")" '"alias": "a"' "docs regenerated the working manifest with the default alias"
 assert_file "$SANDBOX/uploads/docs/index.html" "docs uploaded"
+
+echo "scenario: the build writes no manifest → later manifests cannot replace prod state"
+run_entrypoint 0 0 STUB_BUILD_MODE=missing_manifest
+assert_eq "$RC" "0" "a successful build still exits 0"
+assert_contains "$OUT" "the build's manifest.json is missing" "logs why the manifest was kept"
+assert_file "$SANDBOX/target/manifest.json" "a later step wrote a manifest"
+assert_no_file "$SANDBOX/uploads/artifacts/prod/manifest.json" "the later manifest was not uploaded"
+assert_contains "$(cat "$SANDBOX/uploads/artifacts/prod/run_results.json" 2>/dev/null)" '"written_by": "build"' "the build's results were still uploaded"
+assert_file "$SANDBOX/uploads/artifacts/prod/sources.json" "freshness results were still uploaded"
+
+echo "scenario: the build writes no run results → docs results cannot qualify a manifest"
+run_entrypoint 0 0 STUB_BUILD_MODE=missing_results
+assert_eq "$RC" "1" "summary exits 1 for missing build results"
+assert_file "$SANDBOX/target/run_results.json" "docs wrote run results"
+assert_no_file "$SANDBOX/uploads/artifacts/prod/run_results.json" "the docs results were not uploaded"
+assert_no_file "$SANDBOX/uploads/artifacts/prod/manifest.json" "manifest stayed unpublished"
+
+for node in model.p.b seed.p.lookup snapshot.p.history; do
+  echo "scenario: successful --exclude ${node##*.} → incomplete build keeps the prior manifest"
+  run_entrypoint 0 0 "DBT_BUILD_ARGS=--exclude ${node##*.}"
+  assert_eq "$RC" "0" "selected build still exits 0"
+  assert_contains "$OUT" "not built: $node (no result)" "logs the relation without a result"
+  assert_no_file "$SANDBOX/uploads/artifacts/prod/manifest.json" "incomplete build manifest was not uploaded"
+  assert_contains "$(cat "$SANDBOX/uploads/artifacts/prod/run_results.json" 2>/dev/null)" '"written_by": "build"' "selected build's results still uploaded"
+  assert_file "$SANDBOX/uploads/artifacts/prod/sources.json" "freshness results still uploaded"
+done
+
+echo "scenario: exclude only a test → every persisted relation still qualifies"
+run_entrypoint 0 0 'DBT_BUILD_ARGS=--exclude t'
+assert_eq "$RC" "0" "build still exits 0"
+assert_file "$SANDBOX/uploads/artifacts/prod/manifest.json" "complete manifest uploaded"
+
+echo "scenario: unreadable build manifest → diagnostics still uploaded"
+run_entrypoint 0 0 STUB_BUILD_MODE=bad_manifest
+assert_eq "$RC" "0" "build still exits 0"
+assert_contains "$OUT" "the build's manifest.json is missing or unreadable" "logs why the manifest was kept"
+assert_no_file "$SANDBOX/uploads/artifacts/prod/manifest.json" "unreadable manifest was not uploaded"
+assert_file "$SANDBOX/uploads/artifacts/prod/run_results.json" "run results still uploaded"
 
 echo "scenario: a model errored → summary and run_results still published, manifest kept, job still fails"
 run_entrypoint 1 0
@@ -130,7 +215,9 @@ assert_eq "$RC" "1" "exits with dbt source freshness's code"
 assert_contains "$OUT" '"dbt_summary"' "dbt_summary line emitted"
 assert_contains "$(cat "$SANDBOX/uploads/artifacts/prod/run_results.json" 2>/dev/null)" '"written_by": "build"' "build's run_results.json uploaded"
 assert_file "$SANDBOX/uploads/artifacts/prod/manifest.json" "manifest.json uploaded (the build was green)"
-assert_file "$SANDBOX/uploads/docs/index.html" "docs uploaded"
+uploaded_docs=$(cat "$SANDBOX/uploads/docs/index.html" 2>/dev/null)
+assert_contains "$uploaded_docs" 'const manifest = {"nodes":{"model.p.a":{"alias":"a"}}};' "index.html contains the embedded manifest"
+assert_contains "$uploaded_docs" 'const catalog = {"nodes":{"model.p.a":{"columns":{"id":{"name":"id"}}}}};' "index.html contains the embedded catalog"
 
 echo "scenario: every model built, a data test failed → new manifest published, job still fails"
 run_entrypoint 1 0 STUB_BUILD_MODE=test_fail
@@ -166,6 +253,15 @@ run_entrypoint 0 0 STUB_FAIL_BUCKET=docs
 assert_eq "$RC" "1" "exits with upload_docs.py's code"
 assert_file "$SANDBOX/uploads/artifacts/prod/manifest.json" "manifest.json uploaded"
 assert_file "$SANDBOX/uploads/artifacts/prod/run_results.json" "run_results.json uploaded"
+
+echo "scenario: docs generation returns zero without a standalone page → docs step fails"
+run_entrypoint 0 0 STUB_DOCS_MISSING_STATIC=true
+assert_eq "$RC" "1" "missing standalone docs give the job a non-zero exit"
+assert_contains "$OUT" "dbt docs generate did not write target/static_index.html" "logs the missing standalone page"
+assert_no_file "$SANDBOX/uploads/docs/index.html" "the docs shell was not published"
+assert_file "$SANDBOX/uploads/artifacts/prod/manifest.json" "manifest.json still uploaded"
+assert_file "$SANDBOX/uploads/artifacts/prod/run_results.json" "run_results.json still uploaded"
+assert_file "$SANDBOX/uploads/artifacts/prod/sources.json" "sources.json still uploaded"
 
 echo "scenario: failed build and failed freshness → build's code wins"
 run_entrypoint 1 4
