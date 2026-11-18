@@ -601,9 +601,9 @@ the job update. Every push to `main` triggers a release so the current head can 
 **Secrets required**
 
 * `GCP_WIF_PROVIDER`
-* `GCP_PROD_SA_EMAIL` — prod runner SA
-* `GCP_PROJECT_PROD` — prod project id
-* `GCP_SCHEDULER_INVOKER_SA` — Scheduler invoker SA email
+* `GCP_PROD_SA_EMAIL` — release and runtime service account in `PROJECT_ID`
+* `GCP_PROJECT_PROD` — project for the runner image, Cloud Run job, Scheduler and production BigQuery dataset
+* `GCP_SCHEDULER_INVOKER_SA` — Scheduler OAuth service account in `GCP_PROJECT_PROD`
 
 **Flow**
 
@@ -644,6 +644,26 @@ cp infra/.env.example infra/.env
 $EDITOR infra/.env
 ```
 
+`PROJECT_ID` and `PROJECT_NUMBER` identify the project that owns WIF, the CI and
+prod runner service accounts, and the template's shared buckets. Set
+`PROD_PROJECT_ID` to put the prod image repository, Cloud Run job, Scheduler job
+and OAuth service account, and BigQuery prod dataset in a separate project. When
+it is blank, they use `PROJECT_ID`.
+
+For split projects, enable billing in both and run bootstrap with access to both.
+Cloud Scheduler requires its OAuth account in the Scheduler job's project.
+The Cloud Run job attaches the runner SA from `PROJECT_ID`, so the effective
+`iam.disableCrossProjectServiceAccountUsage` policy in `PROJECT_ID` must be
+unenforced. Bootstrap checks the policy, then grants the production Cloud Run
+service agent Token Creator on the runner SA. An organization administrator
+controls the policy. [Cloud Run service identity][run-cross-project]
+[Cloud Scheduler HTTP authentication][scheduler-http-auth]
+
+Run `25-set-github-secrets.sh` again after changing project ownership. If there
+is a schedule in the former production project, pause it before enabling the
+new schedule. Grant the runner SA read access to any source datasets outside the
+production project.
+
 2. Enable APIs, create SAs, **Artifact Registry** repo, datasets, docs bucket, and IAM:
 
 ```bash
@@ -651,6 +671,7 @@ $EDITOR infra/.env
 ```
 
 * Artifact Registry repo creation uses `gcloud artifacts repositories create ...`.
+* If local deployment falls back to Cloud Build, the build runs in the production project and its build service account needs writer access to the image repository.
 
 Key env toggles (`infra/.env`):
 
@@ -978,6 +999,8 @@ Notes
 
 [1]: https://www.datafold.com/blog/how-to-setup-dbt-development-environments "Optimizing dbt development environments | Datafold"
 [2]: https://melbdataguy.medium.com/implementing-ci-cd-for-dbt-core-with-bigquery-and-github-actions-f930d48a674b "Implementing CI/CD for dbt-core with BigQuery and Github Actions | by melbdataguy | Medium"
+[run-cross-project]: https://docs.cloud.google.com/run/docs/configuring/jobs/service-identity#use-service-accounts-in-other-projects
+[scheduler-http-auth]: https://docs.cloud.google.com/scheduler/docs/http-target-auth
 [3]: https://klaviyo.tech/continuous-integration-with-dbt-part-2-47c093a0548e "Continuous Integration with dbt (Part 2) | by Corey Angers | Klaviyo Engineering"
 [4]: https://hiflylabs.com/blog/2023/3/16/dbt-docs-as-a-static-website?utm_source=chatgpt.com "dbt Docs as a Static Website"
 [5]: https://www.metaplane.dev/blog/host-and-share-dbt-docs?utm_source=chatgpt.com "3 ways to host and share dbt docs"

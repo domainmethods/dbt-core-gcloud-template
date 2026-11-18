@@ -37,7 +37,7 @@ PROVIDER_ID="${PROVIDER_ID:-github-provider}"
 WIF_PROVIDER="projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/providers/${PROVIDER_ID}"
 CI_SA_EMAIL="${CI_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
 PROD_SA_EMAIL="${PROD_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
-SCHED_SA_EMAIL="${SCHEDULER_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+SCHED_SA_EMAIL="${SCHEDULER_SA_ID}@${PROD_PROJECT_ID}.iam.gserviceaccount.com"
 
 # Use docs bucket as artifacts bucket by default
 ARTIFACTS_BUCKET="${DBT_ARTIFACTS_BUCKET:-${DBT_DOCS_BUCKET}}"

@@ -59,7 +59,7 @@ ensure_wif_binding(){
   local sa_email="$1"
   local tmp_json
   tmp_json="$(mktemp)"
-  gcloud iam service-accounts get-iam-policy "${sa_email}" --format=json >"${tmp_json}"
+  gcloud iam service-accounts get-iam-policy "${sa_email}" --project "${PROJECT_ID}" --format=json >"${tmp_json}"
   if jq -e --arg member "principalSet://iam.googleapis.com/${WIF_RESOURCE}/attribute.repository/${GITHUB_REPO}" \
       '.bindings[]? | select(.role=="roles/iam.workloadIdentityUser") | .members[]? | select(.==$member)' \
       "${tmp_json}" >/dev/null; then
