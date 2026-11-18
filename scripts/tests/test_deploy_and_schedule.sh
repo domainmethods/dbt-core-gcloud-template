@@ -44,6 +44,7 @@ ENV
 echo "gcloud $*" >> "$STUB_DIR/calls.log"
 case "$*" in
   "artifacts docker tags list"*) exit 0 ;;
+  "builds submit"*) echo "staging: $PWD source=${@: -1} ignore=${CLOUDSDK_GCLOUDIGNORE_ENABLED:-unset}" >> "$STUB_DIR/calls.log" ;;
   *"get-iam-policy"*) echo '{}'; exit 0 ;;
   "scheduler jobs describe"*) exit 1 ;;
   "run services describe"*) echo "https://dbt-docs.example"; exit 0 ;;
@@ -93,16 +94,56 @@ for script in 30-deploy-cloud-run-job.sh 80-deploy-docs-viewer.sh; do
   assert_not_contains "$RUN_OUT" "docker not found;" "doesn't claim docker is missing"
 
   echo "scenario: $script, no docker binary → Cloud Build"
-  make_sandbox "$script" no-docker; run_script "$script" ''
+  make_sandbox "$script" no-docker; run_script "$script" 'CLOUDSDK_GCLOUDIGNORE_ENABLED=false'
   assert_eq "$RUN_RC" "0" "exits 0"
   assert_contains "$CALLS" "builds submit" "builds with Cloud Build"
   assert_contains "$RUN_OUT" "docker not found" "says docker is missing"
+  context=.
+  if [[ "$script" == 80-deploy-docs-viewer.sh ]]; then context=./docs-viewer; fi
+  assert_contains "$CALLS" "staging: $SANDBOX source=$context ignore=true" "stages the expected context with ignore rules enabled"
 done
 
 echo "scenario: 80-deploy-docs-viewer.sh Cloud Build targets the viewer app (#28)"
 make_sandbox 80-deploy-docs-viewer.sh no-docker; run_script 80-deploy-docs-viewer.sh ''
 assert_contains "$(grep 'builds submit' <<<"$CALLS")" "--tag us-central1-docker.pkg.dev/test-proj/dbt/dbt-docs:v1" "tags the viewer image"
 assert_contains "$(grep 'builds submit' <<<"$CALLS")" "./docs-viewer" "builds the viewer directory"
+
+echo "scenario: Cloud Build uses staging exclusions for a root viewer context (#115)"
+: > "$SANDBOX/calls.log"
+run_script 80-deploy-docs-viewer.sh 'CLOUDSDK_GCLOUDIGNORE_ENABLED=false DOCS_VIEWER_DIR=.'
+assert_contains "$CALLS" "staging: $SANDBOX source=. ignore=true" "viewer override stages the root with ignore rules enabled"
+
+check_upload_list() (
+  local source="$1" stage uploads
+  stage=$(mktemp -d)
+  trap 'rm -rf "$stage"' EXIT
+  mkdir -p "$stage/source"/{infra,secrets,nested,.direnv}
+  cp "$REPO_ROOT/$source/.gcloudignore" "$stage/source/" || exit 1
+  if [[ "$source" == . ]]; then
+    cp "$REPO_ROOT/.gitignore" "$stage/source/"
+  fi
+  cd "$stage/source" || exit 1
+  touch Dockerfile ordinary.json .env .envrc .direnv/placeholder infra/notes.txt \
+    keyfile.json nested/keyfile.json secrets/placeholder.json
+  if command -v gcloud >/dev/null; then
+    # This SDK command only enumerates files locally. Give it an empty config.
+    uploads=$(env -i PATH="$PATH" HOME="$stage" CLOUDSDK_CONFIG="$stage/sdk" \
+      CLOUDSDK_GCLOUDIGNORE_ENABLED=true CLOUDSDK_CORE_DISABLE_USAGE_REPORTING=true \
+      gcloud meta list-files-for-upload) || exit 1
+  else
+    # Check the explicit patterns with Git's ignore syntax when gcloud is absent.
+    git init -q || exit 1
+    uploads=$(git ls-files --others --exclude-from=.gcloudignore) || exit 1
+  fi
+  test "$(sort <<<"$uploads")" = $'Dockerfile\nordinary.json'
+)
+for source in . docs-viewer; do
+  if check_upload_list "$source"; then
+    pass "$source upload list contains only build files"
+  else
+    fail "$source upload list should contain only build files"
+  fi
+done
 
 echo "scenario: 40-schedule-prod-job.sh uses the 06:00 UTC default (#64)"
 make_sandbox 40-schedule-prod-job.sh no-docker; run_script 40-schedule-prod-job.sh ''

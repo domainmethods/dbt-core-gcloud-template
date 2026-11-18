@@ -85,6 +85,8 @@ $EDITOR infra/.env   # Set PROJECT_ID, REGION, GITHUB_REPO, etc.
 
 #### Step 3: Configure GitHub Integration
 
+Configure the GitHub `production` environment and its deployment branch policy before running the WIF setup.
+
 ```bash
 (cd infra && ./20-wif-github.sh)      # Set up OIDC
 (cd infra && ./25-set-github-secrets.sh)  # Auto-configure repo secrets
@@ -456,7 +458,7 @@ Optional helpers (as needed):
 * [infra/81-grant-docs-viewer-access.sh](#docs-viewer-cloud-run-iam-only) — Grant run.invoker to users/groups for the docs viewer.
 * [infra/85-ensure-notification-channels.sh](#monitoring) — Create/reuse Monitoring email channels; writes NOTIFICATION_CHANNELS.
 * [infra/90-monitoring.sh](#monitoring) — Ensure alerting policies for Run Job, Scheduler, and BigQuery errors.
-* [infra/15-artifacts-lifecycle.sh](#docs--artifacts) — Set GCS lifecycle on artifacts/docs bucket (e.g., delete objects >30 days).
+* [infra/15-artifacts-lifecycle.sh](#docs--artifacts) — Expire CI artifacts under `ci/` after 30 days.
 * [infra/check-operator-iam.sh](#operator-iam-to-run-infra-scripts) — Check current operator’s project roles; helpful before running bootstrap.
 
 Tip: 25/50/70/80/81/85/90/15 are optional and can be run any time after 10 (and when their prerequisites exist).
@@ -593,6 +595,10 @@ Note on INT_DATASET:
 
 ## Release (main → prod container)
 
+The workflow queues production releases through execution. It applies a candidate
+only if its SHA still matches `main` immediately before the job update. Every push
+to `main` triggers a release so the current head can deploy.
+
 **Secrets required**
 
 * `GCP_WIF_PROVIDER`
@@ -645,10 +651,14 @@ Key env toggles (`infra/.env`):
 
 3. Configure GitHub **OIDC / Workload Identity Federation** (no keys):
 
+Install and sign in to `gh`. In GitHub, create the `production` environment and select only the `main` branch for deployments. The protected-branches policy also works when `main` is protected.
+
 ```bash
 (cd infra && ./20-wif-github.sh)
 ```
 
+* Use a dedicated `github-pool` with only the template's GitHub provider. CI retains repository scope. The production binding requires a push to `main` in this repository's `.github/workflows/release.yml` with the `production` environment.
+* For existing installs, rerun this script to replace the old repository-wide grant on the production service account. The GitHub provider secret stays the same.
 * Put the printed `workload_identity_provider` and `service_account` into GitHub Secrets (`GCP_WIF_PROVIDER`, `GCP_CI_SA_EMAIL`).
 * We rely on the official `google-github-actions/auth` Action; OIDC requires `permissions: id-token: write` in the workflow.
 
@@ -832,6 +842,7 @@ This means the operator does not have permission to modify dataset IAM. Options:
 ## Docs & Artifacts
 
 * CI publishes `manifest.json` and optional static docs to your `DBT_ARTIFACTS_BUCKET`.
+* Optionally run `infra/15-artifacts-lifecycle.sh` with `jq` and `curl` to expire only `ci/` objects after 30 days. It replaces the exact legacy 30-day bucket-wide Delete rule and keeps other rules.
 * For static docs, we use `dbt docs generate --static` and host a single HTML file if needed (see community examples of static hosting). ([Hiflylabs][4], [Metaplane][5])
 
 ---
