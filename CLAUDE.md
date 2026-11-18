@@ -58,9 +58,9 @@ UTC `TIMESTAMP`s until the mart layer, converted once there.
 - No `DATETIME(TIMESTAMP(x), tz)` or `DATETIME(CAST(x AS TIMESTAMP), tz)` anywhere unless the `DATETIME(` line or the one above has `-- tz-ok: <reason>`. When `x` is already a local `DATETIME`, it is read as UTC and shifted again; dbt, sqlfluff and tests all accept it. Check the input's type, not the syntax.
 - Configure with `TZ_LINT_ZONES` / `TZ_LINT_LAYERS`. Converted columns get a suffix naming the zone (e.g. `_local`, `_ny`) so readers can tell them from UTC.
 SQLFluff config is in `.sqlfluff` — max line length 120, bigquery dialect, dbt templater.
-PR lint selects enabled SQL models with `dbt ls` and uses SQLFluff's offline Jinja templater with dbt builtins.
-Models that use custom dbt macros may need an offline stub in `[sqlfluff:templater:jinja:macros]`.
-The local hooks still use the dbt templater.
+PR lint (`scripts/lint_ci_sql.sh`) selects enabled SQL models with `dbt ls` and uses SQLFluff's offline Jinja templater with dbt builtins.
+It passes `--ignore templating`, so `env_var`, package macros (`dbt_utils.*`) and project macros render as placeholders instead of failing; no stubs needed. `dbt ls` has already parsed the Jinja.
+The local hooks still use the dbt templater. `scripts/tests/test_sqlfluff_ci.sh` (in `make test-scripts`) needs `dbt`, `sqlfluff==3.4.2` and `jq` on PATH.
 The hooks go through `scripts/sqlfluff_hook.sh`, which runs `dbt deps` first when `dbt_packages/.deps-ok` is missing or older than `packages.yml` / `package-lock.yml` (the dbt templater can't compile without packages). The marker is written only after `dbt deps` succeeds, so a failed install is retried on the next push.
 
 `package-lock.yml` is committed: after changing `packages.yml`, run `dbt deps` and commit both.

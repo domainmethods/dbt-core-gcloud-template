@@ -2,6 +2,13 @@
 # Exercises CI lint with dbt and SQLFluff installed and an empty credential environment.
 set -euo pipefail
 
+for tool in dbt sqlfluff jq; do
+  command -v "$tool" >/dev/null || {
+    echo "test_sqlfluff_ci.sh needs $tool on PATH (make deps; pip install sqlfluff==3.4.2)" >&2
+    exit 1
+  }
+done
+
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 fixture_dir=$(mktemp -d)
 trap 'rm -rf "$fixture_dir"' EXIT
@@ -22,22 +29,38 @@ cat > models/enabled.sql <<'SQL'
 select id
 from {{ source('raw', 'example') }}
 SQL
+# Package macros and env_var are valid dbt but undefined in SQLFluff's Jinja builtins.
+# A local stand-in for dbt_utils keeps dbt ls offline.
+mkdir -p utils_stub/macros
+printf 'name: dbt_utils\nversion: "1.0.0"\nconfig-version: 2\n' > utils_stub/dbt_project.yml
+cat > utils_stub/macros/keys.sql <<'SQL'
+{% macro generate_surrogate_key(cols) %}md5(cast({{ cols | join(' || ') }} as string)){% endmacro %}
+SQL
+printf 'packages:\n  - local: utils_stub\n' > packages.yml
+cat > models/uses_package.sql <<'SQL'
+select
+    {{ dbt_utils.generate_surrogate_key(['id']) }} as sk,
+    '{{ env_var("DBT_LINT_LABEL", "none") }}' as label
+from {{ source('raw', 'example') }}
+SQL
 printf '{{ config(enabled=false) }}\n\nselect  1 as lint_value\n' > models/disabled.sql
 
-lint_models() {
+offline() {
   env -i HOME="$fixture_dir" PATH="$PATH" DBT_TARGET=ci DBT_PROFILES_DIR=./profiles \
-    DBT_GCP_PROJECT_CI=lint-ci DBT_BQ_DATASET=lint_ci DBT_SEND_ANONYMOUS_USAGE_STATS=false \
-    bash "$repo_root/scripts/lint_ci_sql.sh" --format json
+    DBT_GCP_PROJECT_CI=lint-ci DBT_BQ_DATASET=lint_ci DBT_SEND_ANONYMOUS_USAGE_STATS=false "$@"
 }
+lint_models() { offline bash "$repo_root/scripts/lint_ci_sql.sh" --format json; }
+
+offline dbt deps --quiet
 
 if ! report=$(lint_models) || ! jq -e '
-  length == 1 and .[0].filepath == "models/enabled.sql"
-  and .[0].statistics.templated_chars > 0 and .[0].violations == []
+  (map(.filepath) | sort) == ["models/enabled.sql", "models/uses_package.sql"]
+  and all(.[]; .statistics.templated_chars > 0 and .violations == [])
 ' <<< "$report" >/dev/null; then
-  printf 'Expected a valid, linted enabled model. Got:\n%s\n' "$report" >&2
+  printf 'Expected valid, linted enabled models. Got:\n%s\n' "$report" >&2
   exit 1
 fi
-echo "Accepted enabled model"
+echo "Accepted enabled models, including dbt_utils and env_var calls"
 
 sed 's/select id/select  id/' models/enabled.sql > models/invalid.sql
 status=0
@@ -49,3 +72,14 @@ if [[ $status == 0 ]] || ! jq -e '
   exit 1
 fi
 echo "Rejected invalid enabled model with LT01"
+
+rm models/invalid.sql
+printf "select 1 from {{ ref('no_such_model') }}\n" > models/broken.sql
+status=0
+output=$(lint_models 2>&1) || status=$?
+if [[ $status == 0 ]] || [[ $output != *"dbt ls failed"* ]] || [[ $output != *no_such_model* ]] \
+  || [[ $output == *"parse error"* ]]; then
+  printf 'Expected dbt ls error to be shown and exit non-zero. Got (%s):\n%s\n' "$status" "$output" >&2
+  exit 1
+fi
+echo "Reported dbt ls failure"
