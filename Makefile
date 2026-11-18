@@ -50,7 +50,8 @@ lint-fix:
 
 docs:
 	dbt docs generate --static
-	@echo "Open target/index.html in your browser"
+	@test -f target/static_index.html || { echo "dbt docs generate did not write target/static_index.html" >&2; exit 1; }
+	@echo "Open target/static_index.html in your browser"
 
 # Compare dev vs prod (usage: make compare MODEL=fct_example)
 compare:
