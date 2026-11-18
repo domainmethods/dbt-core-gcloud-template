@@ -43,8 +43,8 @@ while IFS= read -r dataset; do
       access: (
         (.access // [])
         | map(select(.specialGroup != "projectWriters"))
-        | (if $ci != "" then . + [{"userByEmail": $ci, "role": "WRITER"}] else . end)
-        | unique_by(.role, (.userByEmail // ""), (.groupByEmail // ""), (.specialGroup // ""))
+        | {"userByEmail": $ci, "role": "WRITER"} as $entry
+        | if $ci == "" or any(.[]; . == $entry) then . else . + [$entry] end
       )
     }' <<< "$metadata" > "$acl_file"
     if ! bq --project_id="$PROJECT" update --source "$acl_file" "$ref" >/dev/null 2>&1; then

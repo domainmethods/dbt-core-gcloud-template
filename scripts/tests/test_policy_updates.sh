@@ -219,4 +219,31 @@ jq -e '
   and any(.bindings[]; .condition.title == "existing" and .members == ["group:ops@example.test"])
   and any(.bindings[]; .condition == null and any(.members[]; startswith("serviceAccount:dbt-prod@")))
 ' "$sandbox/bucket.json" >/dev/null
+
+echo "scenario: bootstrap preserves complete authorized ACL entries"
+reset_policies
+ci_email=dbt-ci@fixture-project.iam.gserviceaccount.com
+prod_email=dbt-prod@fixture-project.iam.gserviceaccount.com
+cat > "$sandbox/original-acl.json" <<'JSON'
+{"etag":"dataset-etag","access":[
+  {"view":{"projectId":"fixture-project","datasetId":"sharing","tableId":"view_one"}},
+  {"view":{"projectId":"fixture-project","datasetId":"sharing","tableId":"view_two"}},
+  {"role":"READER","domain":"one.example.test"},
+  {"role":"READER","domain":"two.example.test"},
+  {"routine":{"projectId":"fixture-project","datasetId":"sharing","routineId":"routine_one"}},
+  {"dataset":{"dataset":{"projectId":"fixture-project","datasetId":"sharing"},"targetTypes":["VIEWS"]}},
+  {"role":"OWNER","specialGroup":"projectOwners"},
+  {"role":"WRITER","specialGroup":"projectWriters"},
+  {"role":"WRITER","userByEmail":"dbt-ci@fixture-project.iam.gserviceaccount.com"}
+]}
+JSON
+cp "$sandbox/original-acl.json" "$sandbox/dataset.json"
+echo 'PROD_HARDEN_ACL=true' >> "$sandbox/infra/.env"
+run_script infra/10-bootstrap.sh || fail "bootstrap ACL hardening failed"
+jq -e --slurpfile before "$sandbox/original-acl.json" --arg ci "$ci_email" --arg prod "$prod_email" '
+  .access == (
+    $before[0].access | map(select(.role != "WRITER"))
+    + [{role:"READER", userByEmail:$ci}, {role:"WRITER", userByEmail:$prod}]
+  )
+' "$sandbox/dataset.json" >/dev/null || fail "bootstrap changed ACL records outside its writer and reader grants"
 echo "policy update tests passed"

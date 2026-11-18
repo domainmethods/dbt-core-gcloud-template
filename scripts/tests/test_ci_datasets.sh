@@ -143,4 +143,24 @@ if bash "$REPO_ROOT/scripts/create_bq_dataset.sh"; then
 fi
 jq -e '.labels == {}' "datasets/$finance.json" >/dev/null || fail "existing dataset was relabeled"
 
+echo "scenario: hardening a reused dataset removes only projectWriters"
+printf '{"nodes": {}}\n' > target/manifest.json
+seed_dataset "$base" 1098 "$base"
+jq '.access = [
+  {"view":{"projectId":"ciproj","datasetId":"sharing","tableId":"view_one"}},
+  {"view":{"projectId":"ciproj","datasetId":"sharing","tableId":"view_two"}},
+  {"role":"READER","domain":"one.example.test"},
+  {"role":"READER","domain":"two.example.test"},
+  {"routine":{"projectId":"ciproj","datasetId":"sharing","routineId":"routine_one"}},
+  {"dataset":{"dataset":{"projectId":"ciproj","datasetId":"sharing"},"targetTypes":["VIEWS"]}},
+  {"role":"OWNER","specialGroup":"projectOwners"},
+  {"role":"WRITER","specialGroup":"projectWriters"},
+  {"role":"WRITER","userByEmail":"ci@example.test"}
+]' "datasets/$base.json" > before.json
+cp before.json "datasets/$base.json"
+bash "$REPO_ROOT/scripts/create_bq_dataset.sh"
+jq -e --slurpfile before before.json '
+  .access == ($before[0].access | map(select(.specialGroup != "projectWriters")))
+' "datasets/$base.json" >/dev/null || fail "CI changed ACL records outside the projectWriters grant"
+
 echo "CI dataset tests passed"
