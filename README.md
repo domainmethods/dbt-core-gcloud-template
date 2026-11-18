@@ -847,10 +847,12 @@ The job can generate a single-file site (`target/index.html`) via `dbt docs gene
   * Configure and print URL:
     * `(cd infra && PUBLIC=true ./70-configure-docs-website.sh)`
     * Then open: `https://storage.googleapis.com/${DBT_DOCS_BUCKET}/index.html`
+  * A shell value of `PUBLIC=true` or `PUBLIC=false` takes precedence over `infra/.env`.
   * Caution: Public means world-readable. Use only if acceptable.
 
 * Option B — Private access (no public read)
-  * Keep the bucket private (default). View via Cloud Console (Storage > Buckets > your bucket > `index.html` > Open in browser) when authenticated.
+  * Run `(cd infra && PUBLIC=false ./70-configure-docs-website.sh)` to revoke the website helper's public reader grant. It checks bucket IAM for remaining public grants. Inherited IAM and object ACLs are separate access controls.
+  * View via Cloud Console (Storage > Buckets > your bucket > `index.html` > Open in browser) when authenticated.
   * For a private HTTP endpoint, consider a Cloud Run proxy or Load Balancer + CDN with IAM integration. Ask if you want me to add a tiny Cloud Run service that serves the file from GCS using the service account.
 
 * Option C — Load Balancer + CDN (prod-grade)
