@@ -456,7 +456,7 @@ Optional helpers (as needed):
 * [infra/81-grant-docs-viewer-access.sh](#docs-viewer-cloud-run-iam-only) — Grant run.invoker to users/groups for the docs viewer.
 * [infra/85-ensure-notification-channels.sh](#monitoring) — Create/reuse Monitoring email channels; writes NOTIFICATION_CHANNELS.
 * [infra/90-monitoring.sh](#monitoring) — Ensure alerting policies for Run Job, Scheduler, and BigQuery errors.
-* [infra/15-artifacts-lifecycle.sh](#docs--artifacts) — Set GCS lifecycle on artifacts/docs bucket (e.g., delete objects >30 days).
+* [infra/15-artifacts-lifecycle.sh](#docs--artifacts) — Expire CI artifacts under `ci/` after 30 days.
 * [infra/check-operator-iam.sh](#operator-iam-to-run-infra-scripts) — Check current operator’s project roles; helpful before running bootstrap.
 
 Tip: 25/50/70/80/81/85/90/15 are optional and can be run any time after 10 (and when their prerequisites exist).
@@ -832,6 +832,7 @@ This means the operator does not have permission to modify dataset IAM. Options:
 ## Docs & Artifacts
 
 * CI publishes `manifest.json` and optional static docs to your `DBT_ARTIFACTS_BUCKET`.
+* Optionally run `infra/15-artifacts-lifecycle.sh` with `jq` and `curl` to expire only `ci/` objects after 30 days. It replaces the exact legacy 30-day bucket-wide Delete rule and keeps other rules.
 * For static docs, we use `dbt docs generate --static` and host a single HTML file if needed (see community examples of static hosting). ([Hiflylabs][4], [Metaplane][5])
 
 ---

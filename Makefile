@@ -23,6 +23,7 @@ test:
 # Shell script tests. No warehouse connection, no credentials, no cost.
 test-scripts:
 	bash scripts/tests/test_pr_schema_diff.sh
+	bash scripts/tests/test_artifacts_lifecycle.sh
 	bash scripts/tests/test_pr_data_diff.sh
 	bash scripts/tests/test_get_changed_models.sh
 	bash scripts/tests/test_ci_build.sh
