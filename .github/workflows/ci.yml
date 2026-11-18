@@ -73,6 +73,8 @@ jobs:
   bigquery-ci:
     needs: [lint, yamllint]
     runs-on: ubuntu-latest
+    env:
+      DBT_BQ_LOCATION: ${{ secrets.BQ_LOCATION || 'US' }}
     permissions:
       id-token: write
       contents: read
