@@ -1,66 +1,73 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Cleans up orphaned CI datasets (ci_pr_*) older than MAX_AGE_HOURS.
-# Usage:
-#   DBT_GCP_PROJECT_CI=my-project scripts/cleanup_ci_datasets.sh
-#   DRY_RUN=true DBT_GCP_PROJECT_CI=my-project scripts/cleanup_ci_datasets.sh
-#
-# Optional env:
-#   MAX_AGE_HOURS  — delete datasets older than this (default: 24)
-#   DRY_RUN        — if "true", list but don't delete (default: false)
-#   DATASET_PREFIX — prefix to match (default: ci_pr_)
-
+# Sweep old datasets owned by this GitHub repository. For a manual sweep, set
+# DBT_GCP_PROJECT_CI and GITHUB_REPOSITORY_ID. DRY_RUN=true previews removals.
+# MAX_AGE_HOURS (default: 24) and DATASET_PREFIX (default: ci_pr_) narrow the sweep.
+source "$(dirname "$0")/lib/ci_datasets.sh"
 PROJECT="${DBT_GCP_PROJECT_CI:?Set DBT_GCP_PROJECT_CI}"
-MAX_AGE_HOURS="${MAX_AGE_HOURS:-24}"
-DRY_RUN="${DRY_RUN:-false}"
-PREFIX="${DATASET_PREFIX:-ci_pr_}"
+require_ci_repository
+filter="labels.dbt_ci_repository:$GITHUB_REPOSITORY_ID"
+run=""
 
-cutoff_epoch=$(date -d "-${MAX_AGE_HOURS} hours" +%s 2>/dev/null || date -v-${MAX_AGE_HOURS}H +%s)
+case "${1:-}" in
+  --current-run)
+    require_ci_run_dataset
+    run="$DBT_BQ_DATASET"
+    prefix="$run"
+    filter+=" labels.dbt_ci_run:$run"
+    dry_run=false
+    echo "Cleaning datasets owned by $run in $PROJECT"
+    ;;
+  "")
+    age="${MAX_AGE_HOURS:-24}"
+    if [[ ! "$age" =~ ^[0-9]+$ ]]; then
+      echo "[error] MAX_AGE_HOURS must be a nonnegative integer" >&2
+      exit 1
+    fi
+    cutoff=$(date -d "-$age hours" +%s 2>/dev/null || date -v-"${age}"H +%s)
+    cutoff_ms=$((cutoff * 1000))
+    prefix="${DATASET_PREFIX:-ci_pr_}"
+    dry_run="${DRY_RUN:-false}"
+    echo "Sweeping owned CI datasets in $PROJECT with prefix '$prefix' older than ${age}h"
+    ;;
+  *)
+    echo "[error] Unknown cleanup mode: $1" >&2
+    exit 1
+    ;;
+esac
 
-echo "Cleaning CI datasets in ${PROJECT} with prefix '${PREFIX}' older than ${MAX_AGE_HOURS}h"
-echo "Cutoff: $(date -d "@${cutoff_epoch}" -Is 2>/dev/null || date -r "${cutoff_epoch}" -Iseconds)"
-[[ "$DRY_RUN" == "true" ]] && echo "DRY RUN — no datasets will be deleted"
+dataset_ids=$(bq --project_id="$PROJECT" ls --format=json --max_results=10000 --filter="$filter" \
+  | jq -r --arg project "$PROJECT" --arg prefix "$prefix" '
+      .[]
+      | .datasetReference
+      | select(.projectId == $project)
+      | .datasetId | strings
+      | select(startswith($prefix) and test("\\A[A-Za-z0-9_]+\\z"))')
 
 deleted=0
-skipped=0
-
-# List datasets, handle pagination automatically via bq ls
-while IFS= read -r dataset_id; do
-  [[ -z "$dataset_id" ]] && continue
-  [[ "$dataset_id" != ${PREFIX}* ]] && continue
-
-  # Get dataset creation time
-  created_ms=$(bq --project_id="$PROJECT" show --format=json "${PROJECT}:${dataset_id}" 2>/dev/null \
-    | python3 -c "import sys,json; print(json.load(sys.stdin).get('creationTime','0'))" 2>/dev/null || echo "0")
-
-  if [[ "$created_ms" == "0" ]]; then
-    echo "  [skip] ${dataset_id} — could not read creation time"
-    skipped=$((skipped + 1))
+failed=0
+while IFS= read -r dataset; do
+  [[ -z "$dataset" ]] && continue
+  if ! metadata=$(owned_ci_dataset "$dataset" "$run" 2>/dev/null); then
+    echo "  [skip] $dataset (ownership could not be verified)"
     continue
   fi
-
-  created_epoch=$((created_ms / 1000))
-  if [[ $created_epoch -lt $cutoff_epoch ]]; then
-    if [[ "$DRY_RUN" == "true" ]]; then
-      echo "  [dry-run] would delete: ${dataset_id}"
-    else
-      echo "  [delete] ${dataset_id}"
-      bq rm -r -f -d "${PROJECT}:${dataset_id}" || echo "  [warn] failed to delete ${dataset_id}"
-    fi
+  if [[ -z "$run" ]] && ! jq -e --argjson cutoff "$cutoff_ms" '
+    (.creationTime | tonumber?) as $created | $created > 0 and $created < $cutoff
+  ' <<< "$metadata" >/dev/null; then
+    continue
+  fi
+  if [[ "$dry_run" == true ]]; then
+    echo "  [dry-run] would delete: $dataset"
+  elif bq --project_id="$PROJECT" rm -r -f -d "${PROJECT}:$dataset"; then
+    echo "  [deleted] $dataset"
     deleted=$((deleted + 1))
   else
-    skipped=$((skipped + 1))
+    echo "  [error] Failed to delete $dataset" >&2
+    failed=$((failed + 1))
   fi
-done < <(bq ls --project_id="$PROJECT" --format=json --max_results=10000 2>/dev/null \
-  | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    for ds in data:
-        ref = ds.get('datasetReference', {})
-        print(ref.get('datasetId', ''))
-except: pass
-")
+done <<< "$dataset_ids"
 
-echo "Done. Deleted: ${deleted}, Skipped: ${skipped}"
+echo "Done. Deleted: $deleted, Failed: $failed"
+[[ "$failed" -eq 0 ]]

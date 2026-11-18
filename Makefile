@@ -27,6 +27,7 @@ test-scripts:
 	bash scripts/tests/test_pr_data_diff.sh
 	bash scripts/tests/test_get_changed_models.sh
 	bash scripts/tests/test_ci_build.sh
+	bash scripts/tests/test_ci_datasets.sh
 	bash scripts/tests/test_bootstrap_project_grants.sh
 	bash scripts/tests/test_deploy_and_schedule.sh
 	bash scripts/tests/test_set_github_secrets.sh
@@ -37,6 +38,7 @@ test-scripts:
 	bash scripts/tests/test_docs_website.sh
 	bash scripts/tests/test_ci_workflow.sh
 	bash scripts/tests/test_entrypoint.sh
+	bash scripts/tests/test_policy_updates.sh
 	python3 scripts/tests/test_release_workflow.py
 
 lint:
@@ -48,7 +50,8 @@ lint-fix:
 
 docs:
 	dbt docs generate --static
-	@echo "Open target/index.html in your browser"
+	@test -f target/static_index.html || { echo "dbt docs generate did not write target/static_index.html" >&2; exit 1; }
+	@echo "Open target/static_index.html in your browser"
 
 # Compare dev vs prod (usage: make compare MODEL=fct_example)
 compare:

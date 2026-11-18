@@ -351,7 +351,7 @@ dbt test
 
 # Generate docs locally
 dbt docs generate --static
-# Open target/index.html in browser
+# Open target/static_index.html in browser
 
 # Check data freshness
 dbt source freshness
@@ -509,7 +509,7 @@ DBT_BQ_LOCATION=US
 
 ```bash
 dbt docs generate --static
-# then open target/index.html
+# then open target/static_index.html
 ```
 
 > The `--static` flag produces a single HTML doc you can host or share easily (no extra assets). See community write‑ups on hosting dbt docs as a static site. ([Hiflylabs][4], [Metaplane][5])
@@ -571,10 +571,10 @@ In addition to row/data diffs, the CI pipeline can generate a schema comparison 
 **Flow**
 
 1. OIDC auth in GitHub Actions (no JSON keys). Ensure `permissions: id-token: write`.
-2. Create ephemeral BigQuery dataset `ci_pr_<PR>_<runid>` (cleaned up at end). The bootstrap grants the CI service account `roles/bigquery.user` so it can create datasets. The workflow then hardens ACLs so only the CI service account is `WRITER` on the dataset (removes `projectWriters`); everyone else is read‑only.
+2. Create `ci_pr_<PR>_<runid>_<attempt>` and the custom-schema datasets listed in the CI manifest. The bootstrap grants the CI service account `roles/bigquery.user` so it can create datasets. The workflow labels each dataset with its repository and run attempt and removes the `projectWriters` ACL.
 3. **Slim CI**: `dbt build --select state:modified+ --defer --state <prod_artifacts>` so only changed nodes + dependents run, resolving upstream refs to prod objects. ([Medium][2], [Klaviyo Engineering][3])
 4. Generate docs and upload to `gs://$DBT_ARTIFACTS_BUCKET/ci/...`.
-5. Always drop the ephemeral dataset.
+5. Drop the datasets with matching ownership labels at the end of the attempt. The scheduled sweep removes older owned datasets left by interrupted runs. Unlabeled datasets created before this change are excluded from the sweep.
 
 > These Slim CI patterns (state selector + deferral) are documented in community engineering posts and case studies. ([Klaviyo Engineering][3], [Medium][2])
 
@@ -617,7 +617,7 @@ Runtime defaults (Cloud Run Job):
 
 * Runs `dbt build` then `dbt source freshness` by default in prod (set `RUN_FRESHNESS=false` to disable, or scope with `FRESHNESS_SELECT`).
 * Uploads `manifest.json`, `run_results.json`, and `sources.json` to `gs://$DBT_ARTIFACTS_BUCKET/prod/`. A failed build, freshness check or docs step still uploads `run_results.json` and `sources.json` and then exits non-zero. `manifest.json` is replaced whenever every model, seed and snapshot built, even if data tests failed. The last uploaded one is kept (CI defers against it) when a model, seed or snapshot errored or was skipped, when the build's `run_results.json` is missing, or when `dbt build` exits 2 or higher. The job log says which case applied.
-* Optionally generates docs (`GENERATE_DOCS=true`) and uploads `target/index.html` to `gs://$DBT_DOCS_BUCKET/index.html` (falls back to `DBT_ARTIFACTS_BUCKET` if `DBT_DOCS_BUCKET` is unset).
+* Optionally generates docs (`GENERATE_DOCS=true`) and uploads `target/static_index.html` to `gs://$DBT_DOCS_BUCKET/index.html` (falls back to `DBT_ARTIFACTS_BUCKET` if `DBT_DOCS_BUCKET` is unset).
 
 > Cloud Run **Jobs** are built for batch/ETL: they run to completion and can be executed on a schedule by Cloud Scheduler without standing up servers.
 
@@ -812,7 +812,7 @@ Notes:
 
 * These are for the operator only. Runtime SAs (CI and Prod) use the minimal roles listed above in “IAM & Security”.
 * Many orgs grant Project Owner to the bootstrapper, run `infra/10-bootstrap.sh` and `infra/20-wif-github.sh`, then revoke and keep least‑privilege going forward.
-* Important: Project Owner does not implicitly include BigQuery dataset admin. To change dataset IAM (e.g., grant the CI/Prod SAs reader/editor on `analytics`), the operator needs `roles/bigquery.admin` (or dataset‑level ownership). If missing, `infra/10-bootstrap.sh` will warn with `bigquery.datasets.setIamPolicy` and continue.
+* Changing dataset access requires the operator to be able to read and update its ACL. Use a current BigQuery CLI and grant `roles/bigquery.admin` or dataset-level ownership as needed.
 * You can disable dataset IAM management entirely by setting `MANAGE_DATASET_IAM=false` in `infra/.env`. The bootstrap will then skip those bindings and avoid warnings in locked‑down environments.
 
 Check your current permissions:
@@ -823,19 +823,13 @@ Check your current permissions:
 
 The script compares your active gcloud principal against the required project roles and flags any missing ones. It also suggests `serviceAccountUser` bindings on specific SAs if needed. It checks direct bindings; if you receive roles via a group, it may not detect that.
 
-### Troubleshooting: dataset IAM warnings in bootstrap
+### Troubleshooting: dataset ACL errors in bootstrap
 
-If you see lines like:
-
-```
-[warn] Failed to set IAM on dataset dm-website-426721:analytics. Check your permissions (need bigquery.datasets.setIamPolicy). Continuing.
-```
-
-This means the operator does not have permission to modify dataset IAM. Options:
+Bootstrap stops if it cannot read a versioned ACL or update it with the etag it read. If the dataset changed concurrently, rerun bootstrap to read the latest ACL. If the operator lacks permissions:
 
 * Grant the operator `roles/bigquery.admin` temporarily and re‑run `infra/10-bootstrap.sh`.
 * Have a privileged admin grant the CI SA `roles/bigquery.dataViewer` on prod datasets and the Prod SA `roles/bigquery.dataEditor`.
-* Ignore the warnings if dataset IAM is managed centrally; the rest of bootstrap (APIs, SAs, bucket IAM, etc.) proceeds.
+* Set `MANAGE_DATASET_IAM=false` if dataset IAM is managed centrally.
 
 ---
 
@@ -849,7 +843,7 @@ This means the operator does not have permission to modify dataset IAM. Options:
 
 ## Serve dbt Docs (HTTP)
 
-The job can generate a single-file site (`target/index.html`) via `dbt docs generate --static` and upload it to the docs bucket. You have a few options to view it over HTTP:
+The job can generate a single-file site (`target/static_index.html`) via `dbt docs generate --static` and upload it to the docs bucket as `index.html`. You have a few options to view it over HTTP:
 
 * Option A — Simple public website (fastest)
   * Set `DBT_DOCS_BUCKET` to a dedicated bucket containing only docs intended for public access.
@@ -899,7 +893,7 @@ Runtime envs:
 
 Automatic upload on prod runs:
 
-* If the prod job sets `GENERATE_DOCS=true` and `DBT_DOCS_BUCKET=<bucket>`, the dbt container uploads `target/index.html` to `gs://<bucket>/index.html` automatically after generation.
+* If the prod job sets `GENERATE_DOCS=true` and `DBT_DOCS_BUCKET=<bucket>`, the dbt container uploads `target/static_index.html` to `gs://<bucket>/index.html` automatically after generation.
 
 ---
 
