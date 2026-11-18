@@ -5,7 +5,13 @@ cd "$(dirname "$0")"
 source ./.env
 
 DOCS_BUCKET="${DBT_DOCS_BUCKET:?Set DBT_DOCS_BUCKET in infra/.env}"
+ARTIFACTS_BUCKET="${DBT_ARTIFACTS_BUCKET:-${DOCS_BUCKET}}"
 PUBLIC=${PUBLIC:-false}
+
+if [[ "$PUBLIC" == true && "$DOCS_BUCKET" == "$ARTIFACTS_BUCKET" ]]; then
+  echo "[error] Public access requires a docs-only bucket. Set DBT_DOCS_BUCKET and DBT_ARTIFACTS_BUCKET to different buckets in infra/.env." >&2
+  exit 1
+fi
 
 echo "Configuring website settings on gs://${DOCS_BUCKET} (index.html)"
 if ! gcloud storage buckets update "gs://${DOCS_BUCKET}" \
