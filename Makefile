@@ -33,6 +33,7 @@ test-scripts:
 	bash scripts/tests/test_lookup_prod_manifest.sh
 	bash scripts/tests/test_ci_workflow.sh
 	bash scripts/tests/test_entrypoint.sh
+	bash scripts/tests/test_policy_updates.sh
 
 lint:
 	pre-commit run --hook-stage manual --all-files
