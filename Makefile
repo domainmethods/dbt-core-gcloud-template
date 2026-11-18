@@ -27,8 +27,10 @@ test-scripts:
 	bash scripts/tests/test_pr_data_diff.sh
 	bash scripts/tests/test_get_changed_models.sh
 	bash scripts/tests/test_ci_build.sh
+	bash scripts/tests/test_bootstrap_project_grants.sh
 	bash scripts/tests/test_deploy_and_schedule.sh
 	bash scripts/tests/test_set_github_secrets.sh
+	bash scripts/tests/test_wif_github.sh
 	bash scripts/tests/test_verify_timezone_conventions.sh
 	bash scripts/tests/test_upsert_pr_comment.sh
 	bash scripts/tests/test_lookup_prod_manifest.sh
@@ -36,6 +38,7 @@ test-scripts:
 	bash scripts/tests/test_ci_workflow.sh
 	bash scripts/tests/test_entrypoint.sh
 	bash scripts/tests/test_sqlfluff_ci.sh
+	python3 scripts/tests/test_release_workflow.py
 
 lint:
 	pre-commit run --hook-stage manual --all-files

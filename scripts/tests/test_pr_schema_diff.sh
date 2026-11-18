@@ -152,8 +152,46 @@ BOTH_TABLES='[{"table_name":"fct_example","table_type":"BASE TABLE"},{"table_nam
 
 is_dev() { [[ "$args" == *ci_pr_1* ]]; }
 
+# prod_not_found: the prod dataset does not exist. Every prod query fails with
+# a non-auth error on stderr, which must not be reported as AUTH_ERROR.
+if [[ "$STUB_MODE" == "prod_not_found" ]] && ! is_dev; then
+  echo 'BigQuery error in query operation: Not found: Dataset prodproj:analytics' >&2
+  exit 1
+fi
+
+# Model bq query's 100-row default and --max_rows override for large fixtures.
+max_rows=100
+for arg in "$@"; do
+  case "$arg" in --max_rows=*) max_rows=${arg#*=} ;; esac
+done
+side=prod
+if is_dev; then side=dev; fi
+view=${args##*INFORMATION_SCHEMA.}
+view=${view%% *}
+fixture="$side-$view.json"
+if [[ -f "$fixture" ]]; then
+  jq --argjson limit "$max_rows" '.[:$limit]' "$fixture"
+  exit $?
+fi
+
+rows_at_limit() {
+  echo 'BigQuery warning on stderr' >&2
+  jq -n --argjson limit "$max_rows" --argjson fields "$1" \
+    '[range($limit) | {table_name: "a_noise_\(.)"} + $fields]'
+}
+
 case "$args" in
   *TABLE_OPTIONS*)
+    if ! is_dev; then
+      case "$STUB_MODE" in
+        prod_options_overflow)
+          rows_at_limit '{"option_name":"require_partition_filter","option_value":"true"}'
+          exit $? ;;
+        prod_options_denied)
+          echo 'BigQuery error: Access Denied reading TABLE_OPTIONS' >&2
+          exit 1 ;;
+      esac
+    fi
     echo '[]' ;;
 
   *INFORMATION_SCHEMA.COLUMNS*)
@@ -185,7 +223,9 @@ case "$args" in
     # One dataset-wide listing now serves BOTH the batched table-type lookup and
     # the orphan report: they are byte-identical queries and deliberately share
     # a cache entry, so there is nothing left to dispatch between.
-    if [[ "$STUB_MODE" == "prod_type_denied" ]] && ! is_dev; then
+    if [[ "$STUB_MODE" == "orphan_tables_overflow" && "$args" == *prodproj.overflow* ]]; then
+      rows_at_limit '{"table_type":"BASE TABLE"}'
+    elif [[ "$STUB_MODE" == "prod_type_denied" ]] && ! is_dev; then
       # COLUMNS succeeds, TABLES is denied: without classification this used to
       # surface as NEW_MODEL ("nothing to compare") instead of a failure.
       echo 'BigQuery error in query operation: Access Denied: Dataset prodproj:analytics' >&2
@@ -227,6 +267,7 @@ run_diff() {
     DBT_BQ_DATASET=ci_pr_1 \
     DBT_GCP_PROJECT_PROD=prodproj \
     DBT_BQ_DATASET_PROD=analytics \
+    SCHEMA_DIFF_PROD_DATASETS="${SCHEMA_DIFF_PROD_DATASETS:-}" \
     ARTIFACT_DIR="$SANDBOX/out" \
       bash "$SCRIPT" 2>"$SANDBOX/stderr.txt" </dev/null
   )
@@ -685,6 +726,93 @@ scenario_19() {
   cleanup
 }
 
+scenario_20() {
+  echo "  scenario 20: schema metadata past the first 100 results is included"
+  make_sandbox ok_no_orphans
+  # The first selected column is row 100. Its sibling and the table itself
+  # are past the default bq output limit. The wide table also exceeds the
+  # per-argument size limit on Linux when its columns are encoded as JSON.
+  jq -n '
+    [range(99) | {table_name: "a_noise_\(.)", column_name: "id",
+                  ordinal_position: "1", data_type: "INT64", is_nullable: "YES"}]
+    + [
+      {table_name: "fct_example", column_name: "id", ordinal_position: "1", data_type: "INT64", is_nullable: "YES"},
+      {table_name: "fct_example", column_name: "amount", ordinal_position: "2", data_type: "STRING", is_nullable: "YES"}
+    ]
+    + [range(3; 2001) | {table_name: "fct_example", column_name: "measure_\(.)",
+                         ordinal_position: tostring, data_type: "INT64", is_nullable: "YES"}]
+  ' > "$SANDBOX/prod-COLUMNS.json"
+  jq 'map(select(.table_name == "fct_example")
+          | if .column_name == "amount" then .data_type = "NUMERIC" else . end)' \
+    "$SANDBOX/prod-COLUMNS.json" > "$SANDBOX/dev-COLUMNS.json"
+  jq -n '
+    [range(100) | {table_name: "a_noise_\(.)", table_type: "BASE TABLE"}]
+    + [{table_name: "fct_example", table_type: "BASE TABLE"}]
+  ' > "$SANDBOX/prod-TABLES.json"
+  jq -n '
+    [range(100) | {table_name: "a_noise_\(.)", option_name: "require_partition_filter", option_value: "true"}]
+    + [{table_name: "fct_example", option_name: "require_partition_filter", option_value: "true"}]
+  ' > "$SANDBOX/prod-TABLE_OPTIONS.json"
+
+  run_diff; local rc=$?
+  assert_eq 0 "$rc" "exits 0 with more than 100 metadata rows"
+  local line; line=$(summary_line_for fct_example)
+  assert_contains "$line" "|status=OK|" "the selected table after row 100 exists in prod"
+  assert_contains "$line" "|added=0|removed=0|changed=1|opt_changes=1" \
+    "reports the column and option changes after row 100"
+  assert_eq 6 "$(bq_call_count)" "large results still use three queries per dataset"
+  cleanup
+}
+
+scenario_21() {
+  echo "  scenario 21: reaching the result limit aborts the schema report"
+  make_sandbox prod_options_overflow
+  run_diff; local rc=$?
+  assert_eq 1 "$rc" "fails if table options may be truncated"
+  assert_contains "$RUN_STDERR" "metadata result limit" "logs why metadata is incomplete"
+  assert_not_contains "$RUN_STDOUT" "SUMMARY|" "does not classify a model from capped metadata"
+  cleanup
+}
+
+scenario_22() {
+  echo "  scenario 22: an options query error cannot become a schema change"
+  make_sandbox prod_options_denied
+  printf '%s\n' '[{"table_name":"fct_example","option_name":"require_partition_filter","option_value":"true"}]' \
+    > "$SANDBOX/dev-TABLE_OPTIONS.json"
+  run_diff; local rc=$?
+  assert_eq 0 "$rc" "keeps a failure row when the options query is denied"
+  assert_contains "$RUN_STDERR" "Access Denied reading TABLE_OPTIONS" "preserves the CLI diagnostic"
+  assert_contains "$(summary_line_for fct_example)" "|status=AUTH_ERROR|" "options failure is visible in the report"
+  assert_contains "$(summary_line_for fct_example)" "|opt_changes=0" "no option changes are inferred from failed metadata"
+  cleanup
+}
+
+scenario_23() {
+  echo "  scenario 23: a capped orphan-only listing aborts the schema report"
+  make_sandbox orphan_tables_overflow
+  SCHEMA_DIFF_PROD_DATASETS=analytics,overflow run_diff; local rc=$?
+  assert_eq 1 "$rc" "fails before publishing an incomplete orphan count"
+  assert_contains "$RUN_STDERR" "metadata result limit" "logs the capped orphan listing"
+  assert_not_contains "$(cat "$SANDBOX/out/orphans.md")" "Found " "does not report a partial orphan count"
+  cleanup
+}
+
+scenario_24() {
+  echo "  scenario 24: a missing prod dataset is a query error, not an auth error"
+  make_sandbox prod_not_found
+  run_diff; local rc=$?
+  assert_eq 0 "$rc" "keeps a failure row when the prod dataset is missing"
+  assert_contains "$RUN_STDERR" "Not found: Dataset prodproj:analytics" "preserves the CLI diagnostic"
+  assert_contains "$(summary_line_for fct_example)" "|status=NON_JSON|" \
+    "not-found error is classified NON_JSON"
+  assert_not_contains "$(summary_line_for fct_example)" "AUTH_ERROR" \
+    "not-found error is not reported as a permissions failure"
+  assert_contains "$(cat "$SANDBOX/out/orphans.md")" "Could not list tables" \
+    "orphan report says the listing failed"
+  assert_eq 6 "$(bq_call_count)" "failed queries are cached, not retried per model"
+  cleanup
+}
+
 echo "test_pr_schema_diff.sh"
 scenario_1
 scenario_2
@@ -705,6 +833,11 @@ scenario_16
 scenario_17
 scenario_18
 scenario_19
+scenario_20
+scenario_21
+scenario_22
+scenario_23
+scenario_24
 
 echo ""
 echo "passed: $PASS_COUNT  failed: $FAIL_COUNT"
