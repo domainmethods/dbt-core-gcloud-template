@@ -38,12 +38,12 @@ assert_eq "$(wf "'yamllint' in w['jobs']")" "True" "yamllint job exists"
 assert_eq "$(wf "sorted(w['jobs']['bigquery-ci']['needs'])")" "['lint', 'yamllint']" "bigquery-ci needs lint and yamllint"
 assert_contains "$(wf "' '.join(s.get('run', '') for s in w['jobs']['yamllint']['steps'])")" "yamllint ." "lints the whole repo"
 assert_eq "$(wf "any('dbt' in s.get('run', '') for s in w['jobs']['yamllint']['steps'])")" "False" "no dbt install in the yamllint job"
-assert_contains "$(wf "str([s.get('env', {}) for s in w['jobs']['lint']['steps']])")" "'SKIP': 'yamllint'" "lint job no longer runs yamllint twice"
+assert_eq "$(wf "any('yamllint' in s.get('run', '') for s in w['jobs']['lint']['steps'])")" "False" "lint job does not run yamllint twice"
 
 echo "scenario 3: the warehouse job uses the configured BigQuery location (#97)"
 assert_eq "$(wf "w['jobs']['bigquery-ci'].get('env', {}).get('DBT_BQ_LOCATION')")" \
   "\${{ secrets.BQ_LOCATION || 'US' }}" "warehouse job resolves BQ_LOCATION with a US default"
-assert_eq "$(wf "w['jobs']['lint']['steps'][-1]['env']['DBT_BQ_LOCATION']")" "US" \
+assert_eq "$(wf "next(s for s in w['jobs']['lint']['steps'] if s.get('run') == 'bash scripts/lint_ci_sql.sh')['env']['DBT_BQ_LOCATION']")" "US" \
   "SQLFluff still uses the offline US lint profile"
 profile_location=$(python3 -c 'import sys, yaml
 print(yaml.safe_load(open(sys.argv[1]))["dbt_gcloud"]["outputs"]["ci"]["location"])' "$REPO_ROOT/profiles/profiles.yml")
