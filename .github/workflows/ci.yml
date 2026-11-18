@@ -42,15 +42,21 @@ jobs:
       - name: Test shell scripts
         run: |
           bash scripts/tests/test_pr_schema_diff.sh
+          bash scripts/tests/test_artifacts_lifecycle.sh
           bash scripts/tests/test_pr_data_diff.sh
           bash scripts/tests/test_get_changed_models.sh
           bash scripts/tests/test_ci_build.sh
+          bash scripts/tests/test_ci_datasets.sh
+          bash scripts/tests/test_bootstrap_project_grants.sh
           bash scripts/tests/test_upsert_pr_comment.sh
           bash scripts/tests/test_lookup_prod_manifest.sh
+          bash scripts/tests/test_docs_website.sh
           bash scripts/tests/test_entrypoint.sh
           bash scripts/tests/test_verify_timezone_conventions.sh
           bash scripts/tests/test_deploy_and_schedule.sh
           bash scripts/tests/test_set_github_secrets.sh
+          bash scripts/tests/test_policy_updates.sh
+          bash scripts/tests/test_wif_github.sh
       # Timezone conventions (#68): no zone conversion before marts, no DATETIME(TIMESTAMP(x))
       # double shift without a `-- tz-ok: <reason>`. Reads models/ only; no dbt, no credentials.
       - name: Check timezone conventions
@@ -85,6 +91,8 @@ jobs:
   bigquery-ci:
     needs: [lint, yamllint]
     runs-on: ubuntu-latest
+    env:
+      DBT_BQ_LOCATION: ${{ secrets.BQ_LOCATION || 'US' }}
     permissions:
       id-token: write
       contents: read
@@ -120,7 +128,7 @@ jobs:
           echo "DBT_GCP_PROJECT_CI=${{ secrets.GCP_PROJECT_CI }}" >> $GITHUB_ENV
           echo "DBT_ARTIFACTS_BUCKET=${{ secrets.DBT_ARTIFACTS_BUCKET }}" >> $GITHUB_ENV
           echo "DBT_USER=ci_${{ github.actor }}" >> $GITHUB_ENV
-          echo "DBT_BQ_DATASET=ci_pr_${{ github.event.number }}_${{ github.run_id }}" >> $GITHUB_ENV
+          echo "DBT_BQ_DATASET=ci_pr_${{ github.event.number }}_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}" >> $GITHUB_ENV
           echo "DBT_GCP_PROJECT_PROD=${{ secrets.GCP_PROJECT_PROD }}" >> $GITHUB_ENV
           echo "DBT_BQ_DATASET_PROD=${{ secrets.PROD_DATASET }}" >> $GITHUB_ENV
           echo "DIFF_LIMIT=200" >> $GITHUB_ENV
@@ -134,11 +142,16 @@ jobs:
           # Ensure dbt-bigquery (profiles.ci) finds the credentials file minted by auth step
           echo "GOOGLE_APPLICATION_CREDENTIALS=${{ steps.auth.outputs.credentials_file_path }}" >> $GITHUB_ENV
 
+      - name: Install dbt packages
+        run: dbt deps
+
       # Docs/config-only PRs (HAS_MODEL_CHANGES=false) only run `dbt parse`, so they
       # skip every step that touches BigQuery (#29).
       - name: Create ephemeral dataset
         if: ${{ env.HAS_MODEL_CHANGES != 'false' }}
-        run: bash scripts/create_bq_dataset.sh
+        run: |
+          dbt parse --target ci
+          bash scripts/create_bq_dataset.sh
 
       - name: Slim CI build (with defer if prod manifest exists)
         id: dbt_build

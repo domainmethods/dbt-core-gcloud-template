@@ -85,6 +85,8 @@ $EDITOR infra/.env   # Set PROJECT_ID, REGION, GITHUB_REPO, etc.
 
 #### Step 3: Configure GitHub Integration
 
+Configure the GitHub `production` environment and its deployment branch policy before running the WIF setup.
+
 ```bash
 (cd infra && ./20-wif-github.sh)      # Set up OIDC
 (cd infra && ./25-set-github-secrets.sh)  # Auto-configure repo secrets
@@ -349,7 +351,7 @@ dbt test
 
 # Generate docs locally
 dbt docs generate --static
-# Open target/index.html in browser
+# Open target/static_index.html in browser
 
 # Check data freshness
 dbt source freshness
@@ -451,12 +453,12 @@ Core flow (typical first run):
 Optional helpers (as needed):
 
 * [infra/50-ensure-dev-datasets.sh](#developer-onboarding) — Ensure per‑developer datasets + IAM (reads infra/devs.txt; supports --grant-job-user).
-* [infra/70-configure-docs-website.sh](#serve-dbt-docs-http) — Configure docs bucket website index; set PUBLIC=true for public read.
+* [infra/70-configure-docs-website.sh](#serve-dbt-docs-http) — Configure the docs website index and optionally grant public access to a dedicated docs bucket.
 * [infra/80-deploy-docs-viewer.sh](#docs-viewer-cloud-run-iam-only) — Deploy private Cloud Run docs viewer service (reads index.html from GCS).
 * [infra/81-grant-docs-viewer-access.sh](#docs-viewer-cloud-run-iam-only) — Grant run.invoker to users/groups for the docs viewer.
 * [infra/85-ensure-notification-channels.sh](#monitoring) — Create/reuse Monitoring email channels; writes NOTIFICATION_CHANNELS.
 * [infra/90-monitoring.sh](#monitoring) — Ensure alerting policies for Run Job, Scheduler, and BigQuery errors.
-* [infra/15-artifacts-lifecycle.sh](#docs--artifacts) — Set GCS lifecycle on artifacts/docs bucket (e.g., delete objects >30 days).
+* [infra/15-artifacts-lifecycle.sh](#docs--artifacts) — Expire CI artifacts under `ci/` after 30 days.
 * [infra/check-operator-iam.sh](#operator-iam-to-run-infra-scripts) — Check current operator’s project roles; helpful before running bootstrap.
 
 Tip: 25/50/70/80/81/85/90/15 are optional and can be run any time after 10 (and when their prerequisites exist).
@@ -507,7 +509,7 @@ DBT_BQ_LOCATION=US
 
 ```bash
 dbt docs generate --static
-# then open target/index.html
+# then open target/static_index.html
 ```
 
 > The `--static` flag produces a single HTML doc you can host or share easily (no extra assets). See community write‑ups on hosting dbt docs as a static site. ([Hiflylabs][4], [Metaplane][5])
@@ -569,10 +571,10 @@ In addition to row/data diffs, the CI pipeline can generate a schema comparison 
 **Flow**
 
 1. OIDC auth in GitHub Actions (no JSON keys). Ensure `permissions: id-token: write`.
-2. Create ephemeral BigQuery dataset `ci_pr_<PR>_<runid>` (cleaned up at end). The bootstrap grants the CI service account `roles/bigquery.user` so it can create datasets. The workflow then hardens ACLs so only the CI service account is `WRITER` on the dataset (removes `projectWriters`); everyone else is read‑only.
+2. Create `ci_pr_<PR>_<runid>_<attempt>` and the custom-schema datasets listed in the CI manifest. The bootstrap grants the CI service account `roles/bigquery.user` so it can create datasets. The workflow labels each dataset with its repository and run attempt and removes the `projectWriters` ACL.
 3. **Slim CI**: `dbt build --select state:modified+ --defer --state <prod_artifacts>` so only changed nodes + dependents run, resolving upstream refs to prod objects. ([Medium][2], [Klaviyo Engineering][3])
 4. Generate docs and upload to `gs://$DBT_ARTIFACTS_BUCKET/ci/...`.
-5. Always drop the ephemeral dataset.
+5. Drop the datasets with matching ownership labels at the end of the attempt. The scheduled sweep removes older owned datasets left by interrupted runs. Unlabeled datasets created before this change are excluded from the sweep.
 
 > These Slim CI patterns (state selector + deferral) are documented in community engineering posts and case studies. ([Klaviyo Engineering][3], [Medium][2])
 
@@ -626,7 +628,7 @@ Runtime defaults (Cloud Run Job):
 
 * Runs `dbt build` then `dbt source freshness` by default in prod (set `RUN_FRESHNESS=false` to disable, or scope with `FRESHNESS_SELECT`).
 * Uploads `manifest.json`, `run_results.json`, and `sources.json` to `gs://$DBT_ARTIFACTS_BUCKET/prod/`. A failed build, freshness check or docs step still uploads `run_results.json` and `sources.json` and then exits non-zero. `manifest.json` is replaced whenever every model, seed and snapshot built, even if data tests failed. The last uploaded one is kept (CI defers against it) when a model, seed or snapshot errored or was skipped, when the build's `run_results.json` is missing, or when `dbt build` exits 2 or higher. The job log says which case applied.
-* Optionally generates docs (`GENERATE_DOCS=true`) and uploads `target/index.html` to `gs://$DBT_DOCS_BUCKET/index.html` (falls back to `DBT_ARTIFACTS_BUCKET` if `DBT_DOCS_BUCKET` is unset).
+* Optionally generates docs (`GENERATE_DOCS=true`) and uploads `target/static_index.html` to `gs://$DBT_DOCS_BUCKET/index.html` (falls back to `DBT_ARTIFACTS_BUCKET` if `DBT_DOCS_BUCKET` is unset).
 
 > Cloud Run **Jobs** are built for batch/ETL: they run to completion and can be executed on a schedule by Cloud Scheduler without standing up servers.
 
@@ -660,10 +662,14 @@ Key env toggles (`infra/.env`):
 
 3. Configure GitHub **OIDC / Workload Identity Federation** (no keys):
 
+Install and sign in to `gh`. In GitHub, create the `production` environment and select only the `main` branch for deployments. The protected-branches policy also works when `main` is protected.
+
 ```bash
 (cd infra && ./20-wif-github.sh)
 ```
 
+* Use a dedicated `github-pool` with only the template's GitHub provider. CI retains repository scope. The production binding requires a push to `main` in this repository's `.github/workflows/release.yml` with the `production` environment.
+* For existing installs, rerun this script to replace the old repository-wide grant on the production service account. The GitHub provider secret stays the same.
 * Put the printed `workload_identity_provider` and `service_account` into GitHub Secrets (`GCP_WIF_PROVIDER`, `GCP_CI_SA_EMAIL`).
 * We rely on the official `google-github-actions/auth` Action; OIDC requires `permissions: id-token: write` in the workflow.
 
@@ -817,7 +823,7 @@ Notes:
 
 * These are for the operator only. Runtime SAs (CI and Prod) use the minimal roles listed above in “IAM & Security”.
 * Many orgs grant Project Owner to the bootstrapper, run `infra/10-bootstrap.sh` and `infra/20-wif-github.sh`, then revoke and keep least‑privilege going forward.
-* Important: Project Owner does not implicitly include BigQuery dataset admin. To change dataset IAM (e.g., grant the CI/Prod SAs reader/editor on `analytics`), the operator needs `roles/bigquery.admin` (or dataset‑level ownership). If missing, `infra/10-bootstrap.sh` will warn with `bigquery.datasets.setIamPolicy` and continue.
+* Changing dataset access requires the operator to be able to read and update its ACL. Use a current BigQuery CLI and grant `roles/bigquery.admin` or dataset-level ownership as needed.
 * You can disable dataset IAM management entirely by setting `MANAGE_DATASET_IAM=false` in `infra/.env`. The bootstrap will then skip those bindings and avoid warnings in locked‑down environments.
 
 Check your current permissions:
@@ -828,42 +834,41 @@ Check your current permissions:
 
 The script compares your active gcloud principal against the required project roles and flags any missing ones. It also suggests `serviceAccountUser` bindings on specific SAs if needed. It checks direct bindings; if you receive roles via a group, it may not detect that.
 
-### Troubleshooting: dataset IAM warnings in bootstrap
+### Troubleshooting: dataset ACL errors in bootstrap
 
-If you see lines like:
-
-```
-[warn] Failed to set IAM on dataset dm-website-426721:analytics. Check your permissions (need bigquery.datasets.setIamPolicy). Continuing.
-```
-
-This means the operator does not have permission to modify dataset IAM. Options:
+Bootstrap stops if it cannot read a versioned ACL or update it with the etag it read. If the dataset changed concurrently, rerun bootstrap to read the latest ACL. If the operator lacks permissions:
 
 * Grant the operator `roles/bigquery.admin` temporarily and re‑run `infra/10-bootstrap.sh`.
 * Have a privileged admin grant the CI SA `roles/bigquery.dataViewer` on prod datasets and the Prod SA `roles/bigquery.dataEditor`.
-* Ignore the warnings if dataset IAM is managed centrally; the rest of bootstrap (APIs, SAs, bucket IAM, etc.) proceeds.
+* Set `MANAGE_DATASET_IAM=false` if dataset IAM is managed centrally.
 
 ---
 
 ## Docs & Artifacts
 
 * CI publishes `manifest.json` and optional static docs to your `DBT_ARTIFACTS_BUCKET`.
+* Optionally run `infra/15-artifacts-lifecycle.sh` with `jq` and `curl` to expire only `ci/` objects after 30 days. It replaces the exact legacy 30-day bucket-wide Delete rule and keeps other rules.
 * For static docs, we use `dbt docs generate --static` and host a single HTML file if needed (see community examples of static hosting). ([Hiflylabs][4], [Metaplane][5])
 
 ---
 
 ## Serve dbt Docs (HTTP)
 
-The job can generate a single-file site (`target/index.html`) via `dbt docs generate --static` and upload it to the docs bucket. You have a few options to view it over HTTP:
+The job can generate a single-file site (`target/static_index.html`) via `dbt docs generate --static` and upload it to the docs bucket as `index.html`. You have a few options to view it over HTTP:
 
 * Option A — Simple public website (fastest)
-  * Make the docs bucket a static website and grant public read.
+  * Set `DBT_DOCS_BUCKET` to a dedicated bucket containing only docs intended for public access.
+  * Set `DBT_ARTIFACTS_BUCKET` to a different bucket. An empty value defaults to the docs bucket.
+  * Update the bootstrap and deployment configuration to use those buckets before enabling public access.
   * Configure and print URL:
-    * `(cd infra && PUBLIC=true ./70-configure-docs-website.sh)`
+    * `(cd infra && DOCS_PUBLIC=true ./70-configure-docs-website.sh)`
     * Then open: `https://storage.googleapis.com/${DBT_DOCS_BUCKET}/index.html`
+  * `DOCS_PUBLIC=true` or `DOCS_PUBLIC=false` in the shell takes precedence over `PUBLIC` in `infra/.env`. A `PUBLIC` already in the shell (for example, exported by `setup-env.sh`) is ignored; the script re-reads it from `infra/.env`.
   * Caution: Public means world-readable. Use only if acceptable.
 
 * Option B — Private access (no public read)
-  * Keep the bucket private (default). View via Cloud Console (Storage > Buckets > your bucket > `index.html` > Open in browser) when authenticated.
+  * Run `(cd infra && DOCS_PUBLIC=false ./70-configure-docs-website.sh)` to revoke the website helper's public reader grant. It checks bucket IAM for remaining public grants. Inherited IAM and object ACLs are separate access controls.
+  * View via Cloud Console (Storage > Buckets > your bucket > `index.html` > Open in browser) when authenticated.
   * For a private HTTP endpoint, consider a Cloud Run proxy or Load Balancer + CDN with IAM integration. Ask if you want me to add a tiny Cloud Run service that serves the file from GCS using the service account.
 
 * Option C — Load Balancer + CDN (prod-grade)
@@ -899,7 +904,7 @@ Runtime envs:
 
 Automatic upload on prod runs:
 
-* If the prod job sets `GENERATE_DOCS=true` and `DBT_DOCS_BUCKET=<bucket>`, the dbt container uploads `target/index.html` to `gs://<bucket>/index.html` automatically after generation.
+* If the prod job sets `GENERATE_DOCS=true` and `DBT_DOCS_BUCKET=<bucket>`, the dbt container uploads `target/static_index.html` to `gs://<bucket>/index.html` automatically after generation.
 
 ---
 
