@@ -33,8 +33,8 @@ if [[ "$MAKE_DATASET_READONLY" == "true" ]]; then
         .access = (
           (.access // [])
           | map(select(.specialGroup != "projectWriters"))
-          | (if ($ci|length) > 0 then . + [{"userByEmail": $ci, "role":"WRITER"}] else . end)
-          | unique_by(.role, (.userByEmail // ""), (.groupByEmail // ""), (.specialGroup // ""))
+          | {"userByEmail": $ci, "role":"WRITER"} as $entry
+          | if $ci == "" or any(.[]; . == $entry) then . else . + [$entry] end
         )
       ' "$tmpJson" > "$newJson"
       if ! diff -q "$tmpJson" "$newJson" >/dev/null 2>&1; then
