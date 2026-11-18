@@ -46,10 +46,28 @@ ENV
 #!/usr/bin/env bash
 echo "gcloud $*" >> "$STUB_DIR/calls.log"
 case "$*" in
+  "run jobs get-iam-policy "*)
+    if [[ -f "$STUB_DIR/run-iam.json" ]]; then cat "$STUB_DIR/run-iam.json"; else echo '{"bindings":[]}'; fi
+    ;;
+  "run jobs add-iam-policy-binding "*)
+    while (($#)); do
+      case "$1" in
+        --member) member=$2; shift ;;
+        --role) role=$2; shift ;;
+      esac
+      shift
+    done
+    jq -n --arg role "$role" --arg member "$member" '{bindings:[{role:$role,members:[$member]}]}' > "$STUB_DIR/run-iam.json"
+    ;;
   "resource-manager org-policies describe "*) echo "{\"booleanPolicy\":{\"enforced\":${STUB_ORG_POLICY:-false}}}" ;;
   "projects describe prod-proj "*) echo '222222222222' ;;
   "artifacts repositories describe"*) [[ "${STUB_CREATE_RESOURCES:-0}" != 1 ]] || exit 1 ;;
   "iam service-accounts describe"*) [[ "${STUB_CREATE_RESOURCES:-0}" != 1 ]] || exit 1 ;;
+  "iam roles describe dbtReleaseJobIam "*)
+    [[ "${STUB_ROLE_EXISTS:-0}" == 1 ]] || exit 1
+    echo '{"includedPermissions":["run.jobs.setIamPolicy"],"stage":"GA"}'
+    ;;
+  "iam roles create dbtReleaseJobIam "*) echo '{"includedPermissions":["run.jobs.setIamPolicy"],"stage":"GA"}' ;;
   "storage buckets get-iam-policy"*)
     echo '{"bindings":[{"role":"roles/storage.objectAdmin","members":["serviceAccount:dbt-ci@test-proj.iam.gserviceaccount.com"]}]}'
     ;;
@@ -168,6 +186,21 @@ assert_contains "$CALLS" "projects add-iam-policy-binding prod-proj --member=ser
 assert_contains "$CALLS" "beta services identity create --service=run.googleapis.com --project prod-proj" "creates the prod Cloud Run agent before using it"
 assert_contains "$CALLS" "dbt-prod@test-proj.iam.gserviceaccount.com --project test-proj --member serviceAccount:service-222222222222@serverless-robot-prod.iam.gserviceaccount.com --role roles/iam.serviceAccountTokenCreator" "prod Cloud Run agent can use the identity-project runtime SA"
 assert_contains "$CALLS" "dbt-scheduler@prod-proj.iam.gserviceaccount.com --project prod-proj --member serviceAccount:service-222222222222@gcp-sa-cloudscheduler.iam.gserviceaccount.com --role roles/iam.serviceAccountTokenCreator" "prod Scheduler agent can mint the token"
+
+echo "scenario: bootstrap delegates only Run job invoker policy changes (#113)"
+assert_contains "$(grep 'iam roles create dbtReleaseJobIam ' <<< "$CALLS")" "--permissions=run.jobs.setIamPolicy --stage=GA --project prod-proj" "custom role contains only the needed permission"
+role_grant=$(grep 'projects add-iam-policy-binding .*--role=projects/prod-proj/roles/dbtReleaseJobIam' <<< "$CALLS")
+assert_contains "$role_grant" "--member=serviceAccount:dbt-prod@test-proj.iam.gserviceaccount.com" "release identity manages the job policy"
+assert_contains "$role_grant" "api.getAttribute('iam.googleapis.com/modifiedGrantsByRole', []).hasOnly(['roles/run.invoker'])" "permission only allows changing invoker grants"
+assert_not_contains "$CALLS" "--role=roles/run.admin" "bootstrap avoids a Cloud Run Admin grant"
+assert_not_contains "$CALLS" "--role=roles/run.invoker" "Scheduler receives no project-wide Invoker grant"
+
+echo "scenario: bootstrap reuses the existing custom role in the single-project setup (#113)"
+make_sandbox 10-bootstrap.sh no-docker
+run_script 10-bootstrap.sh STUB_ROLE_EXISTS=1
+assert_eq "$RUN_RC" "0" "bootstrap exits 0"
+assert_contains "$CALLS" "iam roles describe dbtReleaseJobIam --project test-proj" "reads role in the single project"
+assert_not_contains "$CALLS" "iam roles create dbtReleaseJobIam" "no duplicate custom role creation"
 
 echo "scenario: enforced cross-project service account policy blocks bootstrap (#107)"
 make_sandbox 10-bootstrap.sh no-docker

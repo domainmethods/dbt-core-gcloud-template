@@ -138,10 +138,12 @@ jobs:
           SCHED_CRON: ${{ secrets.SCHED_CRON }}
           SCHED_SA_EMAIL: ${{ secrets.GCP_SCHEDULER_INVOKER_SA }}
         run: |
+          JOB=dbt-prod-run
           SCHED=dbt-prod-nightly
           # Same cron as infra/40-schedule-prod-job.sh, so a release doesn't reset it (#64).
           SCHED_CRON="${SCHED_CRON:-0 6 * * *}"
-          EXEC_URI="https://run.googleapis.com/v2/projects/${PROD_PROJECT_ID}/locations/${REGION}/jobs/dbt-prod-run:run"
+          EXEC_URI="https://run.googleapis.com/v2/projects/${PROD_PROJECT_ID}/locations/${REGION}/jobs/${JOB}:run"
+          bash scripts/ensure_run_job_invoker.sh "$JOB" "$PROD_PROJECT_ID" "$REGION" "$SCHED_SA_EMAIL"
           sched_location=(--project "$PROD_PROJECT_ID" --location "${SCHED_REGION:-$REGION}")
           if gcloud scheduler jobs describe "$SCHED" "${sched_location[@]}" >/dev/null 2>&1; then
             action=update

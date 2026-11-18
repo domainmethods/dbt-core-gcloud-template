@@ -24,18 +24,7 @@ SCHED_SA_EMAIL="${SCHEDULER_SA_ID}@${PROD_PROJECT_ID}.iam.gserviceaccount.com"
 SCHED_CRON="${SCHED_CRON:-0 6 * * *}"
 
 echo "== Ensure Scheduler SA can invoke the Cloud Run job =="
-TMP_RUN_POLICY="$(mktemp)"
-gcloud run jobs get-iam-policy dbt-prod-run --region "${REGION}" --project "${PROD_PROJECT_ID}" --format=json >"$TMP_RUN_POLICY"
-if jq -e --arg m "serviceAccount:${SCHED_SA_EMAIL}" '.bindings[]? | select(.role=="roles/run.invoker") | .members[]? | select(.==$m)' "$TMP_RUN_POLICY" >/dev/null; then
-  echo "Run invoker already granted."
-else
-  gcloud run jobs add-iam-policy-binding dbt-prod-run \
-    --region "${REGION}" \
-    --member "serviceAccount:${SCHED_SA_EMAIL}" \
-    --role "roles/run.invoker" \
-    --project "${PROD_PROJECT_ID}"
-fi
-rm -f "$TMP_RUN_POLICY"
+bash ../scripts/ensure_run_job_invoker.sh dbt-prod-run "$PROD_PROJECT_ID" "$REGION" "$SCHED_SA_EMAIL"
 
 echo "== Ensure Cloud Scheduler job (cron \"${SCHED_CRON}\", UTC) =="
 echo "[info] Using Scheduler region: ${SCHED_REGION}, Cloud Run region: ${REGION}"

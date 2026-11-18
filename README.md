@@ -609,8 +609,11 @@ the job update. Every push to `main` triggers a release so the current head can 
 
 1. Build Docker image and push to **Artifact Registry** (requires `roles/artifactregistry.writer` on the repo).
 2. Create/update **Cloud Run Job** (e.g., `dbt-prod`) with that image.
-3. Create/update **Cloud Scheduler** trigger on the job (“Triggers” tab in the Job UI), or via CLI, to run on a cron schedule.
-4. (Optional) Execute once after deploy to refresh prod artifacts.
+3. Grant and verify the Scheduler OAuth account's `roles/run.invoker` binding on the job, then create or update the schedule.
+4. Execute once after deploy to refresh prod artifacts.
+
+Run `infra/10-bootstrap.sh` before the first release to provision the release
+identity's job IAM permission. Existing installs can rerun bootstrap to add it.
 
 Releases update the image, dbt target and profiles path, CI mode, BigQuery
 coordinates, and artifact/docs bucket names. Configure runtime settings such as
@@ -767,7 +770,8 @@ source infra/85-ensure-notification-channels.sh
   * GitHub build/publish needs `roles/artifactregistry.writer` on the target repo; runners log in via OIDC.
 * **Scheduler → Cloud Run Job**:
 
-  * Give the Scheduler’s SA permission to invoke the job trigger (use the UI “Add Scheduler Trigger” flow to wire this securely).
+  * The release workflow and `infra/40-schedule-prod-job.sh` grant the Scheduler SA `roles/run.invoker` on `dbt-prod-run` and read back the job's IAM policy before configuring the schedule.
+  * Bootstrap gives the release identity the custom `dbtReleaseJobIam` role in the production project. It contains only `run.jobs.setIamPolicy` and its IAM condition permits changes only to `roles/run.invoker` grants on Cloud Run jobs. [Cloud Run permissions][run-iam-permissions] [IAM conditions for role grants][iam-role-grants]
 
 ---
 
@@ -825,6 +829,8 @@ The person/service running scripts in `infra/` needs elevated, temporary permiss
   * `roles/serviceusage.serviceUsageAdmin` (enable required APIs)
   * `roles/iam.serviceAccountAdmin` (create service accounts)
   * `roles/iam.serviceAccountIamAdmin` (set IAM policy on service accounts)
+  * `roles/iam.roleAdmin` (create the custom release job IAM role)
+  * `roles/resourcemanager.projectIamAdmin` (set project IAM bindings)
   * `roles/iam.workloadIdentityPoolAdmin` (create/update WIF pool/provider)
   * `roles/artifactregistry.admin` (create Artifact Registry repo)
   * `roles/storage.admin` (create bucket + set IAM)
@@ -1001,6 +1007,8 @@ Notes
 [2]: https://melbdataguy.medium.com/implementing-ci-cd-for-dbt-core-with-bigquery-and-github-actions-f930d48a674b "Implementing CI/CD for dbt-core with BigQuery and Github Actions | by melbdataguy | Medium"
 [run-cross-project]: https://docs.cloud.google.com/run/docs/configuring/jobs/service-identity#use-service-accounts-in-other-projects
 [scheduler-http-auth]: https://docs.cloud.google.com/scheduler/docs/http-target-auth
+[run-iam-permissions]: https://docs.cloud.google.com/run/docs/reference/iam/permissions
+[iam-role-grants]: https://docs.cloud.google.com/iam/docs/setting-limits-on-granting-roles
 [3]: https://klaviyo.tech/continuous-integration-with-dbt-part-2-47c093a0548e "Continuous Integration with dbt (Part 2) | by Corey Angers | Klaviyo Engineering"
 [4]: https://hiflylabs.com/blog/2023/3/16/dbt-docs-as-a-static-website?utm_source=chatgpt.com "dbt Docs as a Static Website"
 [5]: https://www.metaplane.dev/blog/host-and-share-dbt-docs?utm_source=chatgpt.com "3 ways to host and share dbt docs"

@@ -92,7 +92,7 @@ if (( GRANT_JOB_USER == 1 )); then
     info "Granting roles/bigquery.jobUser to user:${DEV_EMAIL}"
     gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
       --member="user:${DEV_EMAIL}" \
-      --role="roles/bigquery.jobUser" >/dev/null
+      --role="roles/bigquery.jobUser" --condition=None >/dev/null
   fi
 fi
 
