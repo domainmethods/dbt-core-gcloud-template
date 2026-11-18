@@ -11,8 +11,9 @@ if not bucket_name:
     print("DBT_ARTIFACTS_BUCKET not set; skipping artifact upload")
     sys.exit(0)
 
-# docs generate rewrites target/run_results.json; read and upload the build's copy.
+# The entrypoint saves these before freshness and docs can replace them.
 run_results_path = os.environ.get("DBT_RUN_RESULTS_PATH") or os.path.join("target", "run_results.json")
+build_manifest_path = os.environ.get("DBT_BUILD_MANIFEST_PATH", "")
 
 # Resource types whose prod relation is (re)built from the manifest.
 BUILT_TYPES = ("model", "seed", "snapshot")
@@ -38,6 +39,8 @@ def manifest_decision():
             results = json.load(f)["results"]
     except Exception as e:
         return False, f"the build's run_results.json is missing or unreadable ({e})"
+    if not os.path.isfile(build_manifest_path):
+        return False, "the build's manifest.json is missing"
     not_built = [
         f"{r.get('unique_id')} ({r.get('status')})"
         for r in results
@@ -55,7 +58,7 @@ def manifest_decision():
 upload_manifest, reason = manifest_decision()
 print(f"manifest.json: {'uploading' if upload_manifest else 'keeping the last uploaded one'}: {reason}")
 paths = {
-    "manifest.json": os.path.join("target", "manifest.json") if upload_manifest else "",
+    "manifest.json": build_manifest_path if upload_manifest else "",
     "run_results.json": run_results_path,
     "sources.json": os.path.join("target", "sources.json"),
 }
