@@ -825,7 +825,9 @@ Bootstrap stops if it cannot read a versioned ACL or update it with the etag it 
 
 ## Docs & Artifacts
 
-* CI publishes `manifest.json` and optional static docs to your `DBT_ARTIFACTS_BUCKET`.
+* CI lists objects and reads `prod/manifest.json` using Storage Object Viewer on the effective artifacts bucket. It uploads and replaces PR artifacts under `ci/` using a conditional Storage Object User grant. The effective bucket is `DBT_ARTIFACTS_BUCKET`, or `DBT_DOCS_BUCKET` when the two are shared.
+* Bootstrap creates new buckets with uniform bucket-level access. For an existing artifacts bucket, migrate access that depends on object ACLs before enabling uniform bucket-level access. [Google Cloud migration guidance](https://docs.cloud.google.com/storage/docs/uniform-bucket-level-access#assign-iam-equivalents-to-object-acls)
+* On rerun, bootstrap verifies the CI grants before removing CI's previous unconditional Storage Object Admin grants on the artifacts and docs buckets. Check any separately managed or inherited grants when auditing effective access.
 * For static docs, we use `dbt docs generate --static` and host a single HTML file if needed (see community examples of static hosting). ([Hiflylabs][4], [Metaplane][5])
 
 ---

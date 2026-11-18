@@ -21,6 +21,7 @@ if [[ "${PUBLIC}" == "true" ]]; then
   if gcloud storage buckets add-iam-policy-binding "gs://${DOCS_BUCKET}" \
     --member=allUsers \
     --role=roles/storage.objectViewer \
+    --condition=None \
     --project "${PROJECT_ID}" --quiet; then
     echo
     echo "Public URL: https://storage.googleapis.com/${DOCS_BUCKET}/index.html"
@@ -28,7 +29,7 @@ if [[ "${PUBLIC}" == "true" ]]; then
     echo "[warn] Failed to grant public read access to gs://${DOCS_BUCKET}" >&2
     echo "       The bucket website is configured but remains private." >&2
     echo "       You can manually grant public access via:" >&2
-    echo "       gcloud storage buckets add-iam-policy-binding gs://${DOCS_BUCKET} --member=allUsers --role=roles/storage.objectViewer --project ${PROJECT_ID}" >&2
+    echo "       gcloud storage buckets add-iam-policy-binding gs://${DOCS_BUCKET} --member=allUsers --role=roles/storage.objectViewer --condition=None --project ${PROJECT_ID}" >&2
   fi
 else
   echo "Bucket remains private. To access docs, either:"

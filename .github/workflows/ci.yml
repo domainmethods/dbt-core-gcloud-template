@@ -195,17 +195,19 @@ jobs:
           else
             # Verify the CI identity can list the bucket; if not, print guidance and skip.
             if ! gsutil ls "gs://${DBT_ARTIFACTS_BUCKET}/" >/dev/null 2>&1; then
-              echo "[warn] CI does not have list access to gs://${DBT_ARTIFACTS_BUCKET}/" >&2
-              echo "       Grant roles/storage.objectAdmin to ${CI_SA_EMAIL} on this bucket or run infra/10-bootstrap.sh" >&2
+              echo "[warn] CI could not list gs://${DBT_ARTIFACTS_BUCKET}/" >&2
+              echo "       Run infra/10-bootstrap.sh to verify CI artifact access." >&2
               exit 0
             fi
+            artifact_uri="gs://${DBT_ARTIFACTS_BUCKET}/ci/pr-${{ github.event.number }}-${{ github.run_id }}"
+            # Composite uploads can create temporary objects outside ci/.
             if [[ -d ./target ]]; then
-              gsutil -m rsync -r ./target "gs://${DBT_ARTIFACTS_BUCKET}/ci/pr-${{ github.event.number }}-${{ github.run_id }}/"
+              gsutil -o GSUtil:parallel_composite_upload_threshold=0 -m rsync -r ./target "${artifact_uri}/"
             else
               echo "No ./target directory found; skipping docs rsync"
             fi
             if [[ -f target/manifest.json ]]; then
-              gsutil cp target/manifest.json "gs://${DBT_ARTIFACTS_BUCKET}/ci/pr-${{ github.event.number }}-${{ github.run_id }}/manifest.json"
+              gsutil -o GSUtil:parallel_composite_upload_threshold=0 cp target/manifest.json "${artifact_uri}/manifest.json"
             else
               echo "No target/manifest.json found; skipping manifest upload"
             fi
