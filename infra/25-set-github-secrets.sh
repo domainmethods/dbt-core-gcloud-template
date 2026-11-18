@@ -44,7 +44,7 @@ ARTIFACTS_BUCKET="${DBT_ARTIFACTS_BUCKET:-${DBT_DOCS_BUCKET}}"
 
 # Optional values: empty in .env means "use the workflow's default", so a secret
 # left over from an earlier run would override it. Delete those instead of skipping.
-OPTIONAL_SECRETS=" SCHED_CRON "
+OPTIONAL_SECRETS=" SCHED_CRON GENERATE_DOCS RUN_FRESHNESS FRESHNESS_SELECT DBT_MAX_BYTES_BILLED DBT_BQ_PRIORITY DBT_JOB_EXECUTION_TIMEOUT_SEC "
 
 # One call per secret instead of an associative array: `declare -A` needs bash 4,
 # and macOS ships /bin/bash 3.2, which `#!/usr/bin/env bash` picks up by default.
@@ -87,5 +87,12 @@ set_secret IMAGE_NAME "$IMAGE_NAME"
 # dbt runtime envs
 set_secret PROD_DATASET "$PROD_DATASET"
 set_secret BQ_LOCATION "$BQ_LOCATION"
+# Initial Cloud Run Job settings for release-first installs
+set_secret GENERATE_DOCS "${GENERATE_DOCS:-}"
+set_secret RUN_FRESHNESS "${RUN_FRESHNESS:-}"
+set_secret FRESHNESS_SELECT "${FRESHNESS_SELECT:-}"
+set_secret DBT_MAX_BYTES_BILLED "${DBT_MAX_BYTES_BILLED:-}"
+set_secret DBT_BQ_PRIORITY "${DBT_BQ_PRIORITY:-}"
+set_secret DBT_JOB_EXECUTION_TIMEOUT_SEC "${DBT_JOB_EXECUTION_TIMEOUT_SEC:-}"
 
 echo "Done. Verify with: gh secret list -R $GITHUB_REPO"

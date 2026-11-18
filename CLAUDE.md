@@ -74,12 +74,12 @@ The hooks go through `scripts/sqlfluff_hook.sh`, which runs `dbt deps` first whe
 
 ### CI Pipeline (`.github/workflows/ci.yml`)
 PR triggers: SQLFluff and yamllint jobs → `bigquery-ci` job that:
-1. Creates ephemeral dataset `ci_pr_<number>_<run_id>`
+1. Creates `ci_pr_<number>_<run_id>_<attempt>` and custom-schema datasets from the CI manifest, with ownership labels
 2. Downloads prod manifest from GCS for Slim CI (`state:modified+` with `--defer`)
 3. Runs `dbt build` against only modified models (full build when `requirements.txt` or `profiles/` changes, since `state:modified` can't see a dbt/adapter bump)
 4. Generates data diffs (`scripts/pr_data_diff.sh`) and schema diffs (`scripts/pr_schema_diff.sh`)
 5. Posts diff summaries as PR comments
-6. Cleans up ephemeral dataset
+6. Cleans up datasets owned by that run attempt
 
 ### Release Pipeline (`.github/workflows/release.yml`)
 Push to `main` triggers: Docker build → push to Artifact Registry → update Cloud Run Job → execute immediately. The container (`entrypoint.sh`) runs `dbt build`, optional source freshness, optional docs generation, and uploads artifacts to GCS.
