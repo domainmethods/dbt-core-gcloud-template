@@ -13,3 +13,6 @@ exclude_rules = RF02,ST06,ST07,AM03,JJ01
 [sqlfluff:templater:dbt]
 project_dir = .
 profiles_dir = profiles
+
+[sqlfluff:templater:jinja]
+apply_dbt_builtins = True

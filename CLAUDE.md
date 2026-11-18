@@ -58,6 +58,9 @@ UTC `TIMESTAMP`s until the mart layer, converted once there.
 - No `DATETIME(TIMESTAMP(x), tz)` or `DATETIME(CAST(x AS TIMESTAMP), tz)` anywhere unless the `DATETIME(` line or the one above has `-- tz-ok: <reason>`. When `x` is already a local `DATETIME`, it is read as UTC and shifted again; dbt, sqlfluff and tests all accept it. Check the input's type, not the syntax.
 - Configure with `TZ_LINT_ZONES` / `TZ_LINT_LAYERS`. Converted columns get a suffix naming the zone (e.g. `_local`, `_ny`) so readers can tell them from UTC.
 SQLFluff config is in `.sqlfluff` — max line length 120, bigquery dialect, dbt templater.
+PR lint (`scripts/lint_ci_sql.sh`) selects enabled SQL models with `dbt ls` and uses SQLFluff's offline Jinja templater with dbt builtins.
+It passes `--ignore templating`, so `env_var`, package macros (`dbt_utils.*`) and project macros render as placeholders instead of failing; no stubs needed. `dbt ls` has already parsed the Jinja.
+The local hooks still use the dbt templater. `scripts/tests/test_sqlfluff_ci.sh` (in `make test-scripts`) needs `dbt`, `sqlfluff==3.4.2` and `jq` on PATH; locally it skips when one is missing (sqlfluff isn't in `requirements.txt`), in CI it fails.
 The hooks go through `scripts/sqlfluff_hook.sh`, which runs `dbt deps` first when `dbt_packages/.deps-ok` is missing or older than `packages.yml` / `package-lock.yml` (the dbt templater can't compile without packages). The marker is written only after `dbt deps` succeeds, so a failed install is retried on the next push.
 
 `package-lock.yml` is committed: after changing `packages.yml`, run `dbt deps` and commit both.
@@ -70,13 +73,13 @@ The hooks go through `scripts/sqlfluff_hook.sh`, which runs `dbt deps` first whe
 - Sources defined in `models/staging/src_*.yml`
 
 ### CI Pipeline (`.github/workflows/ci.yml`)
-PR triggers: lint job (SQLFluff + yamllint via pre-commit) → `bigquery-ci` job that:
-1. Creates ephemeral dataset `ci_pr_<number>_<run_id>`
+PR triggers: SQLFluff and yamllint jobs → `bigquery-ci` job that:
+1. Creates `ci_pr_<number>_<run_id>_<attempt>` and custom-schema datasets from the CI manifest, with ownership labels
 2. Downloads prod manifest from GCS for Slim CI (`state:modified+` with `--defer`)
 3. Runs `dbt build` against only modified models (full build when `requirements.txt` or `profiles/` changes, since `state:modified` can't see a dbt/adapter bump)
 4. Generates data diffs (`scripts/pr_data_diff.sh`) and schema diffs (`scripts/pr_schema_diff.sh`)
 5. Posts diff summaries as PR comments
-6. Cleans up ephemeral dataset
+6. Cleans up datasets owned by that run attempt
 
 ### Release Pipeline (`.github/workflows/release.yml`)
 Push to `main` triggers: Docker build → push to Artifact Registry → update Cloud Run Job → execute immediately. The container (`entrypoint.sh`) runs `dbt build`, optional source freshness, optional docs generation, and uploads artifacts to GCS.
