@@ -36,7 +36,7 @@ case "$args" in
     exit "${STUB_FRESHNESS_EXIT:-0}" ;;
   *" build "*)
     model_alias=a
-    if [[ "$args" == *" --vars {alias:build_alias} "* ]]; then
+    if [[ "$args" == *' --vars {"alias":"build_alias"} '* ]]; then
       model_alias=build_alias
     fi
     if [[ "${STUB_BUILD_MODE:-}" != missing_manifest ]]; then
@@ -116,7 +116,7 @@ run_entrypoint(){
 }
 
 echo "scenario: full build with alias override → upload the manifest and results from that build"
-run_entrypoint 0 0 'DBT_BUILD_ARGS=--vars {alias:build_alias}'
+run_entrypoint 0 0 'DBT_BUILD_ARGS=--vars {"alias":"build_alias"}'
 assert_eq "$RC" "0" "exits 0"
 assert_contains "$(cat "$SANDBOX/uploads/artifacts/prod/run_results.json" 2>/dev/null)" '"written_by": "build"' "uploaded run_results.json is the build's"
 assert_contains "$(cat "$SANDBOX/uploads/artifacts/prod/run_results.json" 2>/dev/null)" '"relation_name": "db.analytics.build_alias"' "build results record the overridden alias"
