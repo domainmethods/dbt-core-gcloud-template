@@ -458,7 +458,7 @@ Optional helpers (as needed):
 * [infra/81-grant-docs-viewer-access.sh](#docs-viewer-cloud-run-iam-only) — Grant run.invoker to users/groups for the docs viewer.
 * [infra/85-ensure-notification-channels.sh](#monitoring) — Create/reuse Monitoring email channels; writes NOTIFICATION_CHANNELS.
 * [infra/90-monitoring.sh](#monitoring) — Ensure alerting policies for Run Job, Scheduler, and BigQuery errors.
-* [infra/15-artifacts-lifecycle.sh](#docs--artifacts) — Expire CI artifacts under `ci/` after 30 days.
+* [infra/15-artifacts-lifecycle.sh](#docs--artifacts) — Expire CI artifacts under `ci/` and per-execution diagnostics under `prod/runs/` after 30 days.
 * [infra/check-operator-iam.sh](#operator-iam-to-run-infra-scripts) — Check current operator’s project roles; helpful before running bootstrap.
 
 Tip: 25/50/70/80/81/85/90/15 are optional and can be run any time after 10 (and when their prerequisites exist).
@@ -629,6 +629,13 @@ Runtime defaults (Cloud Run Job):
 * Runs `dbt build` then `dbt source freshness` by default in prod (set `RUN_FRESHNESS=false` to disable, or scope with `FRESHNESS_SELECT`).
 * Uploads `manifest.json`, `run_results.json`, and `sources.json` to `gs://$DBT_ARTIFACTS_BUCKET/prod/`. A failed build, freshness check or docs step still uploads `run_results.json` and `sources.json` and then exits non-zero. `manifest.json` is replaced whenever every model, seed and snapshot built, even if data tests failed. The last uploaded one is kept (CI defers against it) when a model, seed or snapshot errored, was skipped or has no result (for example because `DBT_BUILD_ARGS` selected or excluded it), when the build's `run_results.json` or manifest is missing or unreadable, or when `dbt build` exits 2 or higher. The job log says which case applied.
 * Optionally generates docs (`GENERATE_DOCS=true`) and uploads `target/static_index.html` to `gs://$DBT_DOCS_BUCKET/index.html` (falls back to `DBT_ARTIFACTS_BUCKET` if `DBT_DOCS_BUCKET` is unset).
+* Each shared object keeps the newest eligible publication by Cloud Run's reported execution `createTime`, using a SHA-256 digest of the execution name to break ties (the order is stored in `x-goog-meta-dbt-cloud-run-execution-order`, so a public docs bucket exposes only the timestamp and digest). Execution lookups retry briefly on connection errors, 429 and 5xx. GCS generation preconditions enforce the comparison at write time. Task retries retain the execution's order. Available `run_results.json` and `sources.json` are also saved under `prod/runs/<execution>/`, including for superseded executions. `infra/15-artifacts-lifecycle.sh` expires those copies after 30 days. [Cloud Run execution fields](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.jobs.executions)
+
+The fence covers uploads from scheduled and release-triggered executions. Each object advances independently. BigQuery builds can still overlap and modify the same production relations, so CI's manifest can differ from the warehouse after an overlapping write. GitHub release ordering is tracked separately in [#94](https://github.com/domainmethods/dbt-core-gcloud-template/issues/94).
+
+Before the first fenced release, pause the scheduler, stop other invocations and let every execution using the old image finish. Old images can still overwrite the shared objects directly. Resume the scheduler once the job uses the new image. When deploying with `infra/30-deploy-cloud-run-job.sh`, use a fresh `IMAGE_TAG` so it builds the new image.
+
+The default bootstrap's runtime service account already has `run.executions.get` and GCS object access. Custom runtime roles need `run.executions.get` and permission to read and replace the shared GCS objects. Direct uploads outside Cloud Run can write to unmarked objects. Replacing a fenced object requires a Cloud Run execution identity.
 
 > Cloud Run **Jobs** are built for batch/ETL: they run to completion and can be executed on a schedule by Cloud Scheduler without standing up servers.
 
@@ -868,7 +875,7 @@ Bootstrap stops if it cannot read a versioned ACL or update it with the etag it 
 ## Docs & Artifacts
 
 * CI lists objects and reads `prod/manifest.json` using Storage Object Viewer on the effective artifacts bucket. It uploads and replaces PR artifacts under `ci/` using a conditional Storage Object User grant. The effective bucket is `DBT_ARTIFACTS_BUCKET`, or `DBT_DOCS_BUCKET` when the two are shared.
-* Optionally run `infra/15-artifacts-lifecycle.sh` with `jq` and `curl` to expire only `ci/` objects after 30 days. It replaces the exact legacy 30-day bucket-wide Delete rule and keeps other rules.
+* Optionally run `infra/15-artifacts-lifecycle.sh` with `jq` and `curl` to expire only `ci/` and `prod/runs/` objects after 30 days. It replaces the exact legacy 30-day bucket-wide Delete rule and keeps other rules.
 * Bootstrap creates new buckets with uniform bucket-level access. For an existing artifacts bucket, migrate access that depends on object ACLs before enabling uniform bucket-level access. [Google Cloud migration guidance](https://docs.cloud.google.com/storage/docs/uniform-bucket-level-access#assign-iam-equivalents-to-object-acls)
 * Rollback is limited. While the conditional CI grant exists, uniform bucket-level access can't be disabled; remove the grant's condition (or the grant) first. After 90 days enabled, uniform bucket-level access locks permanently. Enabling it hides existing object ACLs, which come back only if it is disabled again, so move ACL-based access to IAM before you enable it.
 * On rerun, bootstrap verifies the CI grants before removing CI's previous unconditional Storage Object Admin grants on the artifacts and docs buckets. Check any separately managed or inherited grants when auditing effective access.

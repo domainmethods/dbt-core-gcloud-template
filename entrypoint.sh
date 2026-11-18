@@ -118,20 +118,21 @@ fi
 
 # Upload core artifacts to artifacts bucket for Slim CI deferral
 export BUILD_EXIT
+ARTIFACTS_EXIT=0
 if [[ -n "${DBT_ARTIFACTS_BUCKET:-}" ]]; then
   echo "Uploading manifest.json, run_results.json, and sources.json (if present) to gs://${DBT_ARTIFACTS_BUCKET}/prod/"
-  python scripts/lib/upload_artifacts.py
+  python scripts/lib/upload_artifacts.py || ARTIFACTS_EXIT=$?
 fi
 
-if [[ "${RUN_POST_HOOK:-false}" == "true" && "${BUILD_EXIT}" -eq 0 && "${FRESHNESS_EXIT}" -eq 0 ]]; then
+if [[ "${RUN_POST_HOOK:-false}" == "true" && "${BUILD_EXIT}" -eq 0 && "${FRESHNESS_EXIT}" -eq 0 && "${ARTIFACTS_EXIT}" -eq 0 ]]; then
   echo "Running post_run.py ..."
   python hooks/post_run.py
 fi
 
 # Propagate the first failure to Cloud Run
-for STEP_EXIT in "${BUILD_EXIT}" "${FRESHNESS_EXIT}" "${DBT_EXIT}" "${DOCS_EXIT}"; do
+for STEP_EXIT in "${BUILD_EXIT}" "${FRESHNESS_EXIT}" "${DBT_EXIT}" "${DOCS_EXIT}" "${ARTIFACTS_EXIT}"; do
   if [[ "${STEP_EXIT}" -ne 0 ]]; then
-    echo "dbt build=${BUILD_EXIT} freshness=${FRESHNESS_EXIT} summary=${DBT_EXIT} docs=${DOCS_EXIT}; exiting ${STEP_EXIT}" >&2
+    echo "dbt build=${BUILD_EXIT} freshness=${FRESHNESS_EXIT} summary=${DBT_EXIT} docs=${DOCS_EXIT} artifacts=${ARTIFACTS_EXIT}; exiting ${STEP_EXIT}" >&2
     exit "${STEP_EXIT}"
   fi
 done

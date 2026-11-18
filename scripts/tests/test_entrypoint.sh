@@ -27,8 +27,9 @@ args=" $* "
 case "$args" in
   *" docs generate "*)
     if [[ "${STUB_DOCS_MISSING_STATIC:-false}" != "true" ]]; then
-      cat > target/static_index.html <<'HTML'
+      cat > target/static_index.html <<HTML
 <script>
+// fixture: ${STUB_FIXTURE:-local}
 const manifest = {"nodes":{"model.p.a":{"alias":"a"}}};
 const catalog = {"nodes":{"model.p.a":{"columns":{"id":{"name":"id"}}}}};
 </script>
@@ -39,7 +40,7 @@ HTML
     echo '<html>docs</html>' > target/index.html
     exit "${STUB_DOCS_EXIT:-0}" ;;
   *" source freshness "*)
-    echo '{"sources": [{"status": "pass"}]}' > target/sources.json
+    echo "{\"fixture\": \"${STUB_FIXTURE:-local}\", \"sources\": [{\"status\": \"pass\"}]}" > target/sources.json
     echo '{"nodes": {"model.p.a": {"alias": "a"}}, "written_by": "freshness"}' > target/manifest.json
     exit "${STUB_FRESHNESS_EXIT:-0}" ;;
   *" build "*)
@@ -50,6 +51,7 @@ HTML
     if [[ "${STUB_BUILD_MODE:-}" != missing_manifest ]]; then
       cat > build-manifest.json <<JSON
 {
+  "fixture": "${STUB_FIXTURE:-local}",
   "nodes": {
     "model.p.a": {"resource_type": "model", "alias": "$model_alias", "config": {"enabled": true, "materialized": "view"}},
     "model.p.b": {"resource_type": "model", "config": {"enabled": true, "materialized": "table"}},
@@ -92,26 +94,56 @@ JSON
       results+=("$(printf '{"unique_id": "%s", "status": "%s", "relation_name": "db.analytics.%s"}' "$uid" "$status" "$relation")")
     done
     IFS=,
-    printf '{"written_by": "build", "results": [%s]}\n' "${results[*]}" > target/run_results.json
+    printf '{"written_by": "build", "fixture": "%s", "results": [%s]}\n' "${STUB_FIXTURE:-local}" "${results[*]}" > target/run_results.json
     exit "${STUB_BUILD_EXIT:-0}" ;;
 esac
 exit 0
 SH
 
 read -r -d '' STUB_STORAGE <<'PY' || true
+import json
 import os
+import time
+from pathlib import Path
+
+from google.api_core.exceptions import PreconditionFailed
 
 
 class _Blob:
     def __init__(self, bucket, name):
         if bucket == os.environ.get("STUB_FAIL_BUCKET"):
             raise RuntimeError(f"stub: upload to {bucket} failed")
-        self.path = os.path.join(os.environ["UPLOAD_ROOT"], bucket, name)
+        self.name = name
+        self.path = Path(os.environ["UPLOAD_ROOT"], bucket, name)
+        self.state_path = self.path.with_suffix(".metadata")
+        self.metadata = None
 
-    def upload_from_file(self, handle, content_type=None):
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        with open(self.path, "wb") as out:
-            out.write(handle.read())
+    def read_state(self):
+        return json.loads(self.state_path.read_text()) if self.state_path.exists() else None
+
+    def upload_from_file(self, handle, content_type=None, if_generation_match=None):
+        self._write(handle.read(), if_generation_match)
+
+    def upload_from_filename(self, filename, content_type=None, if_generation_match=None):
+        self._write(Path(filename).read_bytes(), if_generation_match)
+
+    def _write(self, data, if_generation_match):
+        pause = os.environ.get("STUB_PAUSE_MANIFEST")
+        if pause and self.path.name == "manifest.json":
+            Path(pause + ".ready").touch()
+            deadline = time.monotonic() + 30
+            while not Path(pause + ".resume").exists():
+                if time.monotonic() > deadline:
+                    raise RuntimeError("stub: timed out waiting for the other publisher")
+                time.sleep(0.01)
+        state = self.read_state()
+        generation = state["generation"] if state else 0
+        if if_generation_match is not None and if_generation_match != generation:
+            print("stub: generation changed")
+            raise PreconditionFailed("stub: generation changed")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_bytes(data)
+        self.state_path.write_text(json.dumps({"generation": generation + 1, "metadata": self.metadata}))
 
 
 class _Bucket:
@@ -120,6 +152,15 @@ class _Bucket:
 
     def blob(self, name):
         return _Blob(self.name, name)
+
+    def get_blob(self, name):
+        blob = self.blob(name)
+        state = blob.read_state()
+        if state is None:
+            return None
+        blob.generation = state["generation"]
+        blob.metadata = state["metadata"]
+        return blob
 
 
 class Client:
@@ -130,14 +171,82 @@ PY
 # run_entrypoint <build_exit> <freshness_exit> [VAR=value ...]; sets SANDBOX, RC, OUT.
 run_entrypoint(){
   SANDBOX=$(mktemp -d)
-  mkdir -p "$SANDBOX/bin" "$SANDBOX/stubs/google/cloud" "$SANDBOX/profiles"
+  local stubs="$SANDBOX/stubs"
+  mkdir -p "$SANDBOX/bin" "$stubs/google/"{cloud,api_core,auth/transport} "$SANDBOX/profiles"
   printf '%s\n' "$STUB_DBT" > "$SANDBOX/bin/dbt"
   # -S skips site-packages, whose *-nspkg.pth files can import the real `google`
   # namespace before PYTHONPATH shadows it.
   printf '#!/usr/bin/env bash\nexec python3 -S "$@"\n' > "$SANDBOX/bin/python"
   chmod +x "$SANDBOX/bin/dbt" "$SANDBOX/bin/python"
-  : > "$SANDBOX/stubs/google/__init__.py"; : > "$SANDBOX/stubs/google/cloud/__init__.py"
-  printf '%s\n' "$STUB_STORAGE" > "$SANDBOX/stubs/google/cloud/storage.py"
+  : > "$stubs/google/__init__.py"; : > "$stubs/google/cloud/__init__.py"
+  printf '%s\n' "$STUB_STORAGE" > "$stubs/google/cloud/storage.py"
+  printf 'class PreconditionFailed(Exception): pass\n' > "$stubs/google/api_core/exceptions.py"
+  printf 'def default(scopes): return object(), None\n' > "$stubs/google/auth/__init__.py"
+  cat > "$stubs/requests.py" <<'PY'
+class ConnectionError(OSError):
+    pass
+
+
+class Timeout(OSError):
+    pass
+
+
+class MetadataResponse:
+    status_code = 200
+    text = "projects/123/regions/us-central1"
+
+    def raise_for_status(self):
+        pass
+
+
+def get(url, *, headers, timeout):
+    assert url == "http://metadata.google.internal/computeMetadata/v1/instance/region"
+    assert headers == {"Metadata-Flavor": "Google"}
+    return MetadataResponse()
+PY
+  cat > "$stubs/google/auth/transport/requests.py" <<'PY'
+import os
+
+import requests
+
+# Comma-separated outcomes for successive execution lookups before a success:
+# an HTTP status code or "conn" for a connection error.
+FAILURES = [f for f in os.environ.get("STUB_EXECUTION_FAILURES", "").split(",") if f]
+
+
+class AuthorizedSession:
+    status_code = 200
+
+    def __init__(self, credentials):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        pass
+
+    def get(self, url, *, timeout):
+        assert url == ("https://run.googleapis.com/v2/projects/123/locations/us-central1/"
+                       "jobs/dbt-prod-run/executions/" + os.environ["CLOUD_RUN_EXECUTION"])
+        print(f"stub: execution lookup {url}")
+        self.status_code = 200
+        if FAILURES:
+            outcome = FAILURES.pop(0)
+            if outcome == "conn":
+                raise requests.ConnectionError("stub: connection reset")
+            self.status_code = int(outcome)
+        return self
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"stub: execution lookup HTTP {self.status_code}")
+        if os.environ.get("STUB_EXECUTION_DENIED"):
+            raise RuntimeError("stub: run.executions.get denied")
+
+    def json(self):
+        return {"createTime": os.environ["STUB_CREATED_AT"]}
+PY
   : > "$SANDBOX/profiles/profiles.yml"
   cp "$REPO_ROOT/entrypoint.sh" "$SANDBOX/"
   mkdir -p "$SANDBOX/scripts"; cp -R "$REPO_ROOT/scripts/lib" "$SANDBOX/scripts/"
@@ -266,6 +375,97 @@ assert_file "$SANDBOX/uploads/artifacts/prod/sources.json" "sources.json still u
 echo "scenario: failed build and failed freshness → build's code wins"
 run_entrypoint 1 4
 assert_eq "$RC" "1" "exits with dbt build's code"
+
+run_cloud_entrypoint(){  # <shared uploads> <fixture> <execution createTime> <build exit> <freshness exit> [VAR=value ...]
+  local uploads="$1" fixture="$2" created="$3"
+  shift 3
+  run_entrypoint "$@" UPLOAD_ROOT="$uploads" CLOUD_RUN_JOB=dbt-prod-run \
+    CLOUD_RUN_EXECUTION="dbt-prod-run-$fixture" STUB_FIXTURE="$fixture" STUB_CREATED_AT="$created"
+}
+
+scheduled_time=2026-11-18T12:00:00Z
+release_time=2026-11-18T12:00:00.000000001Z
+
+echo "scenario: a release publishes first, then an older scheduled execution finishes (#119)"
+run_entrypoint 0 0 STUB_FIXTURE=legacy
+shared="$SANDBOX/uploads"
+run_cloud_entrypoint "$shared" release "$release_time" 0 0
+assert_eq "$RC" "0" "release adopts existing unmarked objects"
+run_cloud_entrypoint "$shared" scheduled "$scheduled_time" 0 0
+assert_eq "$RC" "0" "superseded execution still succeeds"
+for name in manifest.json run_results.json sources.json; do
+  assert_contains "$(cat "$shared/artifacts/prod/$name")" '"fixture": "release"' "keeps release $name"
+done
+assert_contains "$(cat "$shared/docs/index.html")" "fixture: release" "keeps release docs"
+docs_order=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["metadata"]["dbt-cloud-run-execution-order"])' \
+  "$shared/docs/index.metadata")
+release_digest=$(python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest())' \
+  "projects/123/locations/us-central1/jobs/dbt-prod-run/executions/dbt-prod-run-release")
+assert_eq "$docs_order" "2026-11-18T12:00:00.000000001Z/$release_digest" \
+  "public docs order holds only createTime and an execution digest"
+assert_file "$shared/artifacts/prod/runs/dbt-prod-run-scheduled/sources.json" "keeps stale execution's freshness diagnostics"
+
+run_cloud_entrypoint "$shared" scheduled "$scheduled_time" 2 4
+assert_eq "$RC" "2" "superseded retry still exits with its build code"
+assert_contains "$(cat "$shared/artifacts/prod/runs/dbt-prod-run-scheduled/run_results.json" 2>/dev/null)" \
+  '"status": "error"' "archives the stale retry's failed build diagnostics"
+assert_contains "$(cat "$shared/artifacts/prod/run_results.json")" '"fixture": "release"' "retry keeps release diagnostics"
+
+run_cloud_entrypoint "$shared" denied "$release_time" 2 0 STUB_EXECUTION_DENIED=1
+assert_eq "$RC" "2" "preserves the build failure when execution lookup fails"
+assert_contains "$OUT" 'run.executions.get denied' "logs execution lookup failure"
+assert_file "$shared/artifacts/prod/runs/dbt-prod-run-denied/run_results.json" "archives diagnostics without an ordering key"
+assert_contains "$(cat "$shared/artifacts/prod/run_results.json")" '"fixture": "release"' "lookup failure leaves canonical diagnostics intact"
+
+echo "scenario: transient execution lookup failures are retried"
+run_cloud_entrypoint "$shared" release "$release_time" 0 0 STUB_EXECUTION_FAILURES=503,conn
+assert_eq "$RC" "0" "publishes after a 503 and a connection error"
+assert_contains "$OUT" "after HTTP 503 (attempt 1/3)" "logs the 5xx retry"
+assert_contains "$OUT" "after ConnectionError (attempt 2/3)" "logs the connection retry"
+
+run_cloud_entrypoint "$shared" release "$release_time" 0 0 STUB_EXECUTION_FAILURES=503,503,503,503
+assert_eq "$RC" "1" "fails once the lookup retries are exhausted"
+assert_eq "$(grep -c '^stub: execution lookup https:' <<< "$OUT")" "6" "docs and artifact uploaders each make three lookup attempts"
+assert_contains "$OUT" "stub: execution lookup HTTP 503" "surfaces the final 5xx"
+
+run_cloud_entrypoint "$shared" release "$release_time" 0 0 STUB_EXECUTION_FAILURES=403
+assert_eq "$RC" "1" "a permission error fails"
+assert_eq "$(grep -c '^stub: execution lookup https:' <<< "$OUT")" "2" "does not retry a 4xx (one lookup per uploader)"
+
+run_entrypoint 0 0 UPLOAD_ROOT="$shared"
+assert_eq "$RC" "1" "a local writer cannot replace fenced objects without an execution identity"
+assert_contains "$(cat "$shared/artifacts/prod/manifest.json")" '"fixture": "release"' "keeps fenced manifest"
+
+for blocked in scheduled release; do
+  echo "scenario: $blocked loses a same-object generation race (#119)"
+  race=$(mktemp -d)
+  if [[ "$blocked" == scheduled ]]; then
+    run_entrypoint 0 0 UPLOAD_ROOT="$race/uploads"
+    assert_eq "$RC" "0" "starts the race with an existing manifest generation"
+    contested="$scheduled_time"; other=release; other_time="$release_time"
+  else
+    contested="$release_time"; other=scheduled; other_time="$scheduled_time"
+  fi
+  (
+    run_cloud_entrypoint "$race/uploads" "$blocked" "$contested" 0 0 STUB_PAUSE_MANIFEST="$race/manifest"
+    echo "$OUT"
+    exit "$RC"
+  ) > "$race/blocked.log" &
+  blocked_pid=$!
+  for ((i = 0; i < 600; i++)); do
+    [[ -f "$race/manifest.ready" ]] && break
+    kill -0 "$blocked_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  assert_file "$race/manifest.ready" "first writer reaches manifest upload"
+  run_cloud_entrypoint "$race/uploads" "$other" "$other_time" 0 0
+  assert_eq "$RC" "0" "second writer publishes while the first is paused"
+  : > "$race/manifest.resume"
+  wait "$blocked_pid"
+  assert_eq "$?" "0" "paused writer resolves the conflict"
+  assert_contains "$(cat "$race/blocked.log")" "stub: generation changed" "GCS rejects the stale generation"
+  assert_contains "$(cat "$race/uploads/artifacts/prod/manifest.json")" '"fixture": "release"' "release wins either write order"
+done
 
 echo
 echo "passed: $PASS_COUNT, failed: $FAIL_COUNT"
