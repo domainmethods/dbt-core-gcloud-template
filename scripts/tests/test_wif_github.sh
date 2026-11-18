@@ -110,6 +110,13 @@ run_script STUB_NEW_POOL=true STUB_ENVIRONMENT=protected STUB_MAIN_PROTECTED=tru
 grep -Fq "providers create-oidc github-provider" "$SANDBOX/gcloud.log"
 jq -e --arg member "$release" '.bindings[0].members == [$member]' "$SANDBOX/dbt-prod.json" > /dev/null
 
+# Split-project installs (#107): federation and the release identity stay in PROJECT_ID.
+run_script PROD_PROJECT_ID=prod-project
+if grep -q 'prod-project' "$SANDBOX/gcloud.log" || grep -- '--project' "$SANDBOX/gcloud.log" | grep -vq -- '--project fixture-project'; then
+  echo "Federation setup must pin every call to PROJECT_ID, not PROD_PROJECT_ID" >&2
+  exit 1
+fi
+
 assert_preflight_fails() {
   if run_script "$@" > "$SANDBOX/output" 2>&1; then
     echo "Federation setup accepted invalid configuration ($*)" >&2

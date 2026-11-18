@@ -24,25 +24,40 @@ make_sandbox() {  # $1 = script name, $2 = "with-docker" or "no-docker"
   mkdir -p "$SANDBOX/bin" "$SANDBOX/infra" "$SANDBOX/docs-viewer" "$SANDBOX/scripts"
   cp "$REPO_ROOT/infra/$1" "$SANDBOX/infra/"
   cp "$REPO_ROOT/scripts/"*.sh "$SANDBOX/scripts/" 2>/dev/null || true
+  cp -R "$REPO_ROOT/scripts/lib" "$SANDBOX/scripts/"
   cat > "$SANDBOX/infra/.env" <<'ENV'
 PROJECT_ID=test-proj
+PROJECT_NUMBER=111111111111
 REGION=us-central1
 AR_REPO=dbt
 IMAGE_NAME=dbt
 IMAGE_TAG=v1
 PROD_SA_ID=dbt-prod
+CI_SA_ID=dbt-ci
 PROD_DATASET=analytics
 BQ_LOCATION=US
 SCHEDULER_SA_ID=dbt-scheduler
 DBT_DOCS_BUCKET=docs-bucket
 DOCS_VIEWER_SERVICE=dbt-docs
 DOCS_VIEWER_SA_ID=dbt-docs-viewer
+GITHUB_REPO=owner/repo
 ENV
   : > "$SANDBOX/calls.log"
   cat > "$SANDBOX/bin/gcloud" <<'STUB'
 #!/usr/bin/env bash
 echo "gcloud $*" >> "$STUB_DIR/calls.log"
 case "$*" in
+  "resource-manager org-policies describe "*) echo "{\"booleanPolicy\":{\"enforced\":${STUB_ORG_POLICY:-false}}}" ;;
+  "projects describe prod-proj "*) echo '222222222222' ;;
+  "artifacts repositories describe"*) [[ "${STUB_CREATE_RESOURCES:-0}" != 1 ]] || exit 1 ;;
+  "iam service-accounts describe"*) [[ "${STUB_CREATE_RESOURCES:-0}" != 1 ]] || exit 1 ;;
+  "storage buckets describe"*) echo '{"uniform_bucket_level_access":true}' ;;
+  "storage buckets get-iam-policy"*)
+    if [[ -f "$STUB_DIR/bucket.json" ]]; then cat "$STUB_DIR/bucket.json"; else
+      echo '{"etag":"bucket-etag","bindings":[{"role":"roles/storage.objectAdmin","members":["serviceAccount:dbt-ci@test-proj.iam.gserviceaccount.com"]}]}'
+    fi
+    ;;
+  "storage buckets set-iam-policy"*) cp "$5" "$STUB_DIR/bucket.json" ;;
   "artifacts docker tags list"*) exit 0 ;;
   "builds submit"*) echo "staging: $PWD source=${@: -1} ignore=${CLOUDSDK_GCLOUDIGNORE_ENABLED:-unset}" >> "$STUB_DIR/calls.log" ;;
   *"get-iam-policy"*) echo '{}'; exit 0 ;;
@@ -50,6 +65,15 @@ case "$*" in
   "run services describe"*) echo "https://dbt-docs.example"; exit 0 ;;
 esac
 exit 0
+STUB
+  cat > "$SANDBOX/bin/bq" <<'STUB'
+#!/usr/bin/env bash
+echo "bq $*" >> "$STUB_DIR/calls.log"
+case " $* " in
+  *" show --format=none "*) exit 1 ;;
+  *" get-iam-policy "*) echo '{"bindings":[]}' ;;
+  *" show --format=prettyjson "*) echo '{"etag":"acl-etag","access":[{"role":"WRITER","specialGroup":"projectWriters"}]}' ;;
+esac
 STUB
   if [[ "$2" == "with-docker" ]]; then
     cat > "$SANDBOX/bin/docker" <<'STUB'
@@ -69,7 +93,7 @@ STUB
     ln -s "$path" "$SANDBOX/bin/$tool"
   done
 }
-HOST_TOOLS="bash env cat dirname basename mktemp rm mkdir cp mv ls jq grep sed awk tr cut head tail sort uniq wc date sleep"
+HOST_TOOLS="bash env cat dirname basename mktemp rm mkdir cp mv ls jq grep sed awk tr cut head tail sort uniq wc date sleep diff"
 
 run_script() {  # $1 = script name, $2 = extra env; sets RUN_OUT, RUN_RC, CALLS
   RUN_OUT=$(env -i PATH="$SANDBOX/bin" STUB_DIR="$SANDBOX" \
@@ -163,6 +187,67 @@ assert_not_contains "$rel" '--schedule "0 6 * * *"' "no hard-coded cron in relea
 assert_contains "$rel" 'secrets.SCHED_CRON' "release.yml reads SCHED_CRON"
 assert_contains "$rel" 'SCHED_CRON: ${{ secrets.SCHED_CRON }}' "passes SCHED_CRON via env:"
 assert_not_contains "$rel" '"${{ secrets.SCHED_CRON }}"' "doesn't inline the secret into the script"
+
+echo "scenario: bootstrap uses the production and identity project owners (#107)"
+make_sandbox 10-bootstrap.sh no-docker
+cat >> "$SANDBOX/infra/.env" <<'ENV'
+PROD_PROJECT_ID=prod-proj
+INT_DATASET=integration
+ENV
+run_script 10-bootstrap.sh STUB_CREATE_RESOURCES=1
+assert_eq "$RUN_RC" "0" "bootstrap exits 0"
+for api in run cloudscheduler artifactregistry bigquery bigquerystorage; do
+  assert_contains "$CALLS" "services enable $api.googleapis.com --project prod-proj" "$api enabled in prod"
+done
+assert_contains "$CALLS" "services enable sts.googleapis.com --project test-proj" "WIF API stays in identity project"
+assert_contains "$(grep 'artifacts repositories create' <<< "$CALLS")" "--project prod-proj" "registry created in prod"
+assert_contains "$(grep 'service-accounts create dbt-prod ' <<< "$CALLS")" "--project test-proj" "prod runtime SA stays in identity project"
+assert_contains "$(grep 'service-accounts create dbt-scheduler ' <<< "$CALLS")" "--project prod-proj" "Scheduler OAuth SA belongs to prod"
+assert_contains "$(grep 'mk -d' <<< "$CALLS")" "prod-proj:analytics" "prod dataset created in prod"
+assert_contains "$(grep 'mk -d' <<< "$CALLS")" "test-proj:integration" "integration dataset stays in identity project"
+assert_contains "$CALLS" "show --format=prettyjson --dataset_view=ACL prod-proj:analytics" "reads the prod dataset ACL in prod"
+assert_contains "$(grep -- '--update_mode=UPDATE_ACL' <<< "$CALLS")" "prod-proj:analytics" "prod dataset ACL updates target prod"
+assert_contains "$CALLS" "show --format=prettyjson --dataset_view=ACL test-proj:integration" "integration dataset ACL stays in identity project"
+assert_not_contains "$CALLS" "test-proj:analytics" "never touches a prod dataset in the identity project"
+assert_contains "$RUN_OUT" "Verified CI read/list and ci/ write bindings" "artifact bucket checks still pass"
+assert_contains "$CALLS" "projects add-iam-policy-binding prod-proj --member=serviceAccount:dbt-prod@test-proj.iam.gserviceaccount.com --role=roles/bigquery.jobUser" "runtime can create jobs in the prod warehouse"
+assert_contains "$CALLS" "projects add-iam-policy-binding prod-proj --member=serviceAccount:dbt-prod@test-proj.iam.gserviceaccount.com --role=roles/run.developer" "release can deploy in prod"
+assert_contains "$CALLS" "projects add-iam-policy-binding prod-proj --member=serviceAccount:dbt-prod@test-proj.iam.gserviceaccount.com --role=roles/cloudscheduler.admin" "release can schedule in prod"
+assert_contains "$CALLS" "projects add-iam-policy-binding prod-proj --member=serviceAccount:dbt-prod@test-proj.iam.gserviceaccount.com --role=roles/artifactregistry.writer" "release can push images in prod"
+assert_contains "$CALLS" "beta services identity create --service=run.googleapis.com --project prod-proj" "creates the prod Cloud Run agent before using it"
+assert_contains "$CALLS" "dbt-prod@test-proj.iam.gserviceaccount.com --project test-proj --member serviceAccount:service-222222222222@serverless-robot-prod.iam.gserviceaccount.com --role roles/iam.serviceAccountTokenCreator" "prod Cloud Run agent can use the identity-project runtime SA"
+assert_contains "$CALLS" "dbt-scheduler@prod-proj.iam.gserviceaccount.com --project prod-proj --member serviceAccount:service-222222222222@gcp-sa-cloudscheduler.iam.gserviceaccount.com --role roles/iam.serviceAccountTokenCreator" "prod Scheduler agent can mint the token"
+
+echo "scenario: enforced cross-project service account policy blocks bootstrap (#107)"
+make_sandbox 10-bootstrap.sh no-docker
+echo 'PROD_PROJECT_ID=prod-proj' >> "$SANDBOX/infra/.env"
+run_script 10-bootstrap.sh STUB_ORG_POLICY=true
+assert_eq "$RUN_RC" "1" "bootstrap exits before provisioning"
+assert_contains "$RUN_OUT" "[error] Cross-project Cloud Run requires iam.disableCrossProjectServiceAccountUsage" "fails on the cross-project policy check"
+assert_contains "$CALLS" "resource-manager org-policies describe iam.disableCrossProjectServiceAccountUsage --project test-proj" "reads the policy in the identity project"
+assert_not_contains "$CALLS" "services enable" "no API mutation with the policy enforced"
+
+echo "scenario: local deploy sends image, build, job and warehouse to prod (#107)"
+make_sandbox 30-deploy-cloud-run-job.sh no-docker
+echo 'PROD_PROJECT_ID=prod-proj' >> "$SANDBOX/infra/.env"
+run_script 30-deploy-cloud-run-job.sh STUB_CREATE_RESOURCES=1
+assert_eq "$RUN_RC" "0" "deployment exits 0"
+assert_contains "$(grep 'artifacts repositories create' <<< "$CALLS")" "--project prod-proj" "creates registry in prod"
+assert_contains "$(grep 'builds submit' <<< "$CALLS")" "--tag us-central1-docker.pkg.dev/prod-proj/dbt/dbt:v1 --project prod-proj" "Cloud Build targets prod image"
+job_call=$(grep 'run jobs deploy' <<< "$CALLS")
+assert_contains "$job_call" "--project prod-proj" "deploy targets prod project"
+assert_contains "$job_call" "--service-account=dbt-prod@test-proj.iam.gserviceaccount.com" "attaches the runtime SA from the identity project"
+assert_contains "$job_call" "DBT_GCP_PROJECT_PROD=prod-proj" "sets BigQuery project in runtime"
+
+echo "scenario: local scheduler uses a prod OAuth SA and a prod Run job (#107)"
+make_sandbox 40-schedule-prod-job.sh no-docker
+echo 'PROD_PROJECT_ID=prod-proj' >> "$SANDBOX/infra/.env"
+run_script 40-schedule-prod-job.sh ''
+assert_eq "$RUN_RC" "0" "Scheduler setup exits 0"
+assert_contains "$(grep 'run jobs add-iam-policy-binding' <<< "$CALLS")" "serviceAccount:dbt-scheduler@prod-proj.iam.gserviceaccount.com" "grants prod Scheduler SA"
+sched_call=$(grep 'scheduler jobs create' <<< "$CALLS")
+assert_contains "$sched_call" "--project prod-proj" "scheduler targets prod project"
+assert_contains "$sched_call" "projects/prod-proj/locations/us-central1/jobs/dbt-prod-run:run" "scheduler invokes prod job"
 
 echo "scenario: sandbox PATH hides host docker/gcloud/gh"
 make_sandbox 30-deploy-cloud-run-job.sh no-docker

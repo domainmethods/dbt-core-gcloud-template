@@ -126,5 +126,14 @@ assert_contains "$CALLS" "gh secret set DBT_MAX_BYTES_BILLED -R owner/repo --bod
 assert_contains "$CALLS" "gh secret set DBT_BQ_PRIORITY -R owner/repo --body batch" "copies priority"
 assert_contains "$CALLS" "gh secret set DBT_JOB_EXECUTION_TIMEOUT_SEC -R owner/repo --body 600" "copies query timeout"
 
+echo "scenario: split-project secrets keep the WIF and release identity separate from prod (#107)"
+make_sandbox 'PROD_PROJECT_ID=another-proj'
+run_script ''
+assert_eq "$RUN_RC" "0" "exits 0"
+assert_contains "$CALLS" "gh secret set GCP_PROJECT_PROD -R owner/repo --body another-proj" "sets prod resource project"
+assert_contains "$CALLS" "gh secret set GCP_PROD_SA_EMAIL -R owner/repo --body dbt-prod@test-proj.iam.gserviceaccount.com" "release SA uses identity project"
+assert_contains "$CALLS" "gh secret set GCP_SCHEDULER_INVOKER_SA -R owner/repo --body dbt-scheduler@another-proj.iam.gserviceaccount.com" "OAuth identity uses Scheduler project"
+assert_contains "$CALLS" "gh secret set GCP_WIF_PROVIDER -R owner/repo --body projects/123/locations/global/" "WIF uses identity project number"
+
 echo "results: passed: $PASS_COUNT, failed: $FAIL_COUNT"
 [[ $FAIL_COUNT -eq 0 ]]

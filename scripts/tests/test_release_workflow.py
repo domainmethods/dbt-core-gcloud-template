@@ -39,6 +39,8 @@ class ReleaseWorkflowTest(unittest.TestCase):
             "GCP_SCHED_REGION": "us-east1",
             "GCP_PROD_SA_EMAIL": "release@identity-project.iam.gserviceaccount.com",
             "GCP_SCHEDULER_INVOKER_SA": "scheduler@production-project.iam.gserviceaccount.com",
+            "AR_REPO": "dbt",
+            "IMAGE_NAME": "runner",
             "PROD_DATASET": "analytics",
             "BQ_LOCATION": "US",
             "DBT_ARTIFACTS_BUCKET": "artifacts",
@@ -81,6 +83,7 @@ printf 'gh %s\n' "$*" >> "$CALLS"
 jq -r "$4" <<<"$MAIN_BRANCH"
 """,
         )
+        self.stub("docker", """printf 'docker %s\n' "$*" >> "$CALLS" """)
 
     def stub(self, name, script):
         path = self.root / name
@@ -108,6 +111,7 @@ jq -r "$4" <<<"$MAIN_BRANCH"
                 **env,
                 "PATH": f"{self.root}:{os.environ['PATH']}",
                 "CALLS": str(self.calls),
+                "GITHUB_ENV": str(self.root / "github-env"),
                 "GITHUB_OUTPUT": str(self.output),
                 "GITHUB_REPOSITORY": "owner/repo",
                 "GITHUB_SHA": sha,
@@ -216,6 +220,23 @@ jq -r "$4" <<<"$MAIN_BRANCH"
                 expected.update(config)
                 self.assertEqual({key: created.get(key) for key in expected}, expected)
                 self.assertEqual(created["DBT_BQ_DATASET_PROD"], "analytics")
+
+    def test_release_uses_production_project_even_with_an_identity_project_default(self):
+        for name in ("Build container", APPLY, SCHEDULE, EXECUTE):
+            with self.subTest(step=name):
+                result = self.step(name, CLOUDSDK_CORE_PROJECT="identity-project")
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+        calls = self.calls.read_text().splitlines()
+        self.assertIn(f"docker build -t us-central1-docker.pkg.dev/production-project/dbt/runner:{NEW_SHA} .", calls)
+        job_calls = [line for line in calls if line.startswith(("gcloud run jobs ", "gcloud scheduler jobs "))]
+        for operation in ("run jobs describe", "run jobs update", "scheduler jobs describe", "scheduler jobs update", "run jobs execute"):
+            self.assertTrue(any(f"gcloud {operation} " in line for line in job_calls), job_calls)
+        for line in job_calls:
+            self.assertIn("--project production-project", line)
+        schedule = next(line for line in job_calls if line.startswith("gcloud scheduler jobs update "))
+        self.assertIn("projects/production-project/locations/us-central1/jobs/dbt-prod-run:run", schedule)
+        self.assertIn("--oauth-service-account-email scheduler@production-project.iam.gserviceaccount.com", schedule)
 
 
 if __name__ == "__main__":

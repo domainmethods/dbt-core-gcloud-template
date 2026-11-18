@@ -19,8 +19,9 @@ info(){ echo "[info] $*"; }
 
 require_env PROJECT_ID REGION AR_REPO IMAGE_NAME IMAGE_TAG PROD_SA_ID PROD_DATASET BQ_LOCATION
 
+PROD_PROJECT_ID="${PROD_PROJECT_ID:-$PROJECT_ID}"
 PROD_SA_EMAIL="${PROD_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
-IMAGE_PATH="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${IMAGE_NAME}"
+IMAGE_PATH="${REGION}-docker.pkg.dev/${PROD_PROJECT_ID}/${AR_REPO}/${IMAGE_NAME}"
 IMAGE_URI="${IMAGE_PATH}:${IMAGE_TAG}"
 
 # Resolve artifacts/docs buckets and docs generation toggle
@@ -43,7 +44,7 @@ elif ! docker info >/dev/null 2>&1; then
 fi
 
 ensure_ar_repo(){
-  if gcloud artifacts repositories describe "$AR_REPO" --location "$REGION" --project "$PROJECT_ID" >/dev/null 2>&1; then
+  if gcloud artifacts repositories describe "$AR_REPO" --location "$REGION" --project "$PROD_PROJECT_ID" >/dev/null 2>&1; then
     info "Artifact Registry repo exists: ${AR_REPO} (${REGION})"
   else
     info "Creating Artifact Registry repo: ${AR_REPO} (${REGION})"
@@ -51,7 +52,7 @@ ensure_ar_repo(){
       --repository-format=docker \
       --location="$REGION" \
       --description="dbt containers" \
-      --project "$PROJECT_ID"
+      --project "$PROD_PROJECT_ID"
   fi
 }
 
@@ -61,7 +62,7 @@ image_tag_exists(){
   tag_exists=$(gcloud artifacts docker tags list "$IMAGE_PATH" \
     --filter="TAG=${IMAGE_TAG}" \
     --format="value(TAG)" \
-    --project "$PROJECT_ID" 2>/dev/null || true)
+    --project "$PROD_PROJECT_ID" 2>/dev/null || true)
   [[ -n "$tag_exists" ]]
 }
 
@@ -82,13 +83,13 @@ ensure_image(){
   else
     info "${NO_DOCKER_REASON}; using Cloud Build to build and push"
     # Ensure Cloud Build API is enabled
-    gcloud services enable cloudbuild.googleapis.com --project "$PROJECT_ID" >/dev/null
+    gcloud services enable cloudbuild.googleapis.com --project "$PROD_PROJECT_ID" >/dev/null
     # Submit build from repo root
     pushd "$(dirname "$PWD")" >/dev/null
     if ! CLOUDSDK_GCLOUDIGNORE_ENABLED=true gcloud builds submit \
-      --region="$REGION" --tag "$IMAGE_URI" --project "$PROJECT_ID" .; then
+      --region="$REGION" --tag "$IMAGE_URI" --project "$PROD_PROJECT_ID" .; then
       echo "[error] Cloud Build failed to build and push image: ${IMAGE_URI}" >&2
-      echo "        Check build logs: gcloud builds log --region=${REGION} --project=${PROJECT_ID}" >&2
+      echo "        Check build logs: gcloud builds log --region=${REGION} --project=${PROD_PROJECT_ID}" >&2
       popd >/dev/null
       exit 1
     fi
@@ -103,7 +104,7 @@ env_kvs=(
   "DBT_TARGET=prod"
   # guard_dev_environment() only lets --target prod through when CI=true.
   "CI=true"
-  "DBT_GCP_PROJECT_PROD=${PROJECT_ID}"
+  "DBT_GCP_PROJECT_PROD=${PROD_PROJECT_ID}"
   "DBT_BQ_DATASET_PROD=${PROD_DATASET}"
   "DBT_BQ_LOCATION=${BQ_LOCATION}"
   "GENERATE_DOCS=${GENERATE_DOCS_FLAG}"
@@ -142,8 +143,8 @@ gcloud run jobs deploy dbt-prod-run \
   --memory=2Gi \
   --cpu=1 \
   --set-env-vars="${ENV_VARS}" \
-  --project "${PROJECT_ID}"
+  --project "${PROD_PROJECT_ID}"
 
 info "Cloud Run Job deployed."
 
-info "Tip: verify SA/envs with:  gcloud run jobs describe dbt-prod-run --region ${REGION} --project ${PROJECT_ID}"
+info "Tip: verify SA/envs with:  gcloud run jobs describe dbt-prod-run --region ${REGION} --project ${PROD_PROJECT_ID}"

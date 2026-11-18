@@ -32,7 +32,9 @@ cat > "$sandbox/bin/gcloud" <<'STUB'
 set -euo pipefail
 echo "gcloud $*" >> "$FIXTURE/calls"
 case "$*" in
-  'projects add-iam-policy-binding '*) printf '%s %s\n' "${5#--role=}" "${4#--member=}" >> "$FIXTURE/grants" ;;
+  'projects add-iam-policy-binding '*) printf '%s %s %s\n' "${5#--role=}" "${4#--member=}" "$3" >> "$FIXTURE/grants" ;;
+  'resource-manager org-policies describe '*) echo '{"booleanPolicy":{}}' ;;
+  'projects describe '*) echo 987654 ;;
   'storage buckets describe '*) echo '{"uniform_bucket_level_access":true}' ;;
   'storage buckets get-iam-policy '*) cat "$FIXTURE/bucket.json" ;;
   'storage buckets set-iam-policy '*) cp "$5" "$FIXTURE/bucket.json" ;;
@@ -59,10 +61,12 @@ run_bootstrap() {
   }
 }
 
+# Members granted a role; with GRANT_PROJECT set, only grants made in that project.
 assert_grants() {
   local role="$1" actual expected=
   shift
-  actual=$(awk -v role="$role" '$1 == role {print $2}' "$sandbox/grants" | sort -u)
+  actual=$(awk -v role="$role" -v project="${GRANT_PROJECT:-}" \
+    '$1 == role && (project == "" || $3 == project) {print $2}' "$sandbox/grants" | sort -u)
   if (( $# )); then expected=$(printf '%s\n' "$@" | sort -u); fi
   if [[ "$actual" != "$expected" ]]; then
     printf 'FAIL %s\nExpected:\n%s\nRecorded:\n%s\n' "$role" "$expected" "$actual" >&2
@@ -96,4 +100,26 @@ run_bootstrap PROD_READ_ONLY=false ENABLE_EXTRA_PROJECT_ROLES=true
 assert_grants roles/artifactregistry.writer "$prod"
 assert_grants roles/bigquery.dataEditor "$ci" "$prod"
 assert_grants roles/dataform.codeCreator "$ci" "$prod"
+echo "scenario: single-project installs grant everything in PROJECT_ID"
+run_bootstrap PROD_READ_ONLY=false ENABLE_EXTRA_PROJECT_ROLES=true
+if awk '$3 != "fixture-project"' "$sandbox/grants" | grep -q .; then
+  echo "FAIL grant outside PROJECT_ID in a single-project install" >&2
+  exit 1
+fi
+
+echo "scenario: split-project grants put the prod runner's roles in PROD_PROJECT_ID (#107)"
+run_bootstrap PROD_PROJECT_ID=prod-project PROD_READ_ONLY=false ENABLE_EXTRA_PROJECT_ROLES=true
+GRANT_PROJECT=prod-project
+for role in user jobUser readSessionUser dataViewer dataEditor; do
+  assert_grants "roles/bigquery.$role" "$prod"
+done
+assert_grants roles/dataform.codeCreator "$prod"
+assert_grants roles/artifactregistry.writer "$prod"
+GRANT_PROJECT=fixture-project
+for role in user jobUser readSessionUser dataViewer; do
+  assert_grants "roles/bigquery.$role" "$ci" "$operator" "$group" "$developer"
+done
+assert_grants roles/bigquery.dataEditor "$ci"
+assert_grants roles/dataform.codeCreator "$ci"
+unset GRANT_PROJECT
 echo "bootstrap project grant tests passed"
