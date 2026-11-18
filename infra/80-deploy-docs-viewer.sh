@@ -48,7 +48,8 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
 else
   echo "docker not found or its daemon isn't running; using Cloud Build"
   gcloud services enable cloudbuild.googleapis.com --project "$PROJECT_ID" >/dev/null
-  if ! gcloud builds submit --region="$REGION" --tag "$IMAGE_URI" --project "$PROJECT_ID" "$APP_DIR"; then
+  if ! CLOUDSDK_GCLOUDIGNORE_ENABLED=true gcloud builds submit \
+    --region="$REGION" --tag "$IMAGE_URI" --project "$PROJECT_ID" "$APP_DIR"; then
     echo "[error] Cloud Build failed to build and push image: ${IMAGE_URI}" >&2
     echo "        Check build logs: gcloud builds log --region=${REGION} --project=${PROJECT_ID}" >&2
     exit 1

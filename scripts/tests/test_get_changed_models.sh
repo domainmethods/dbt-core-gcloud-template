@@ -110,6 +110,42 @@ scenario_2() {
   cleanup
 }
 
+scenario_python_model() {
+  echo "  scenario: Python-only model change -> scoped warehouse build"
+  make_repo
+  mkdir -p "$REPO/models/marts" "$REPO/bin"
+  cat > "$REPO/models/marts/forecast_v1.py" <<'PYTHON'
+def model(dbt, session):
+    dbt.config(materialized="table")
+    return dbt.ref("input_data")
+PYTHON
+  git -C "$REPO" add models
+  git -C "$REPO" commit -q -m "Python model change"
+  run_script "$BASE"
+  assert_contains "$RUN_OUT" "HAS_MODEL_CHANGES=true" "a Python-only change requires a build"
+  assert_contains "$RUN_ENV" "BUILD_SELECT=path:models/marts/forecast_v1.py+" "build selects the Python file and downstream nodes"
+  assert_contains "$RUN_ENV" "DIFF_SELECT=path:models/marts/forecast_v1.py+" "diffs use the same Python selector"
+  assert_contains "$RUN_ENV" "NEEDS_FALLBACK=false" "the Python model is scoped without a state comparison"
+
+  printf '%s\n' '#!/usr/bin/env bash' 'echo "$*" >> "$DBT_CALL_LOG"' > "$REPO/bin/dbt"
+  cat > "$REPO/bin/gsutil" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  ls) exit 0 ;;
+  cp) echo '{}' > "$3" ;;
+  *) exit 1 ;;
+esac
+STUB
+  chmod +x "$REPO/bin/"{dbt,gsutil}
+  local changes=()
+  mapfile -t changes < "$REPO/github_env.txt"
+  (cd "$REPO" && env -i PATH="$REPO/bin:/usr/bin:/bin" DBT_ARTIFACTS_BUCKET=fake-bucket \
+    DBT_CALL_LOG="$REPO/dbt_calls" "${changes[@]}" bash "$REPO_ROOT/scripts/ci_build.sh") >/dev/null 2>&1
+  assert_contains "$(cat "$REPO/dbt_calls")" "build --target ci --select path:models/marts/forecast_v1.py+ --defer" \
+    "the Python-only commit takes the slim warehouse build path"
+  cleanup
+}
+
 scenario_3() {
   echo "  scenario 3: multiple changed .sql models -> space-separated 'a+ b+'"
   make_repo
@@ -291,9 +327,31 @@ scenario_14() {
   cleanup
 }
 
+scenario_15() {
+  echo "  scenario 15: SQL and YAML change on independent models -> keep filename scope and add state fallback"
+  make_repo
+  printf 'select 1 as id\n' > "$REPO/models/sql_changed.sql"
+  printf 'select 2 as id\n' > "$REPO/models/yaml_changed.sql"
+  printf 'version: 2\nmodels:\n  - name: yaml_changed\n    config:\n      materialized: view\n' > "$REPO/models/properties.yml"
+  git -C "$REPO" add models
+  git -C "$REPO" commit -q -m "two independent models"
+  BASE=$(git -C "$REPO" rev-parse HEAD)
+
+  printf 'select 3 as id\n' > "$REPO/models/sql_changed.sql"
+  sed 's/materialized: view/materialized: table/' "$REPO/models/properties.yml" > "$REPO/properties.yml"
+  mv "$REPO/properties.yml" "$REPO/models/properties.yml"
+  git -C "$REPO" commit -qam "change one model's SQL and another's materialization"
+  run_script "$BASE"
+  assert_contains "$RUN_ENV" "BUILD_SELECT=sql_changed+" "the SQL model supplies the filename selector"
+  assert_contains "$RUN_ENV" "DIFF_SELECT=sql_changed+" "the diff keeps the filename scope"
+  assert_contains "$RUN_ENV" "NEEDS_FALLBACK=true" "the independent YAML change also needs state selection"
+  cleanup
+}
+
 echo "test_get_changed_models.sh"
 scenario_1
 scenario_2
+scenario_python_model
 scenario_3
 scenario_4
 scenario_5
@@ -306,6 +364,7 @@ scenario_11
 scenario_12
 scenario_13
 scenario_14
+scenario_15
 
 echo ""
 echo "passed: $PASS_COUNT  failed: $FAIL_COUNT"
