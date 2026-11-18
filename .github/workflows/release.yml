@@ -3,7 +3,12 @@ name: release
 on:
   push:
     branches: [main]
-    paths-ignore: ["README.md"]
+
+# Keep the lock through the immediate Cloud Run execution.
+concurrency:
+  group: production-release
+  queue: max
+  cancel-in-progress: false
 
 env:
   REGION: ${{ secrets.GCP_REGION }}
@@ -60,6 +65,9 @@ jobs:
         run: docker push "$IMAGE_URI"
 
       - name: Create/Update Cloud Run Job
+        id: apply
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           JOB=dbt-prod-run
           set -e
@@ -74,13 +82,27 @@ jobs:
           #   --set-secrets "API_KEY=api-key-secret:latest,DB_PASS=db-password:latest"
           # Requires: infra/10-bootstrap.sh grants secretAccessor to the prod SA.
           if gcloud run jobs describe "$JOB" --region "${{ env.REGION }}" >/dev/null 2>&1; then
-            gcloud run jobs update "$JOB" "${COMMON_ARGS[@]}"
+            action=update
           else
-            gcloud run jobs create "$JOB" "${COMMON_ARGS[@]}" \
-              --memory=2Gi --cpu=1 --max-retries=0
+            action=create
+            COMMON_ARGS+=(--memory=2Gi --cpu=1 --max-retries=0)
           fi
 
+          # Read the live ref after selecting the action and before changing the job.
+          current_sha=$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
+          if [[ ! "$current_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Could not verify the head of main."
+            exit 1
+          fi
+          if [[ "$GITHUB_SHA" != "$current_sha" ]]; then
+            echo "::notice::Skipping superseded release $GITHUB_SHA. Current main is $current_sha."
+            exit 0
+          fi
+          gcloud run jobs "$action" "$JOB" "${COMMON_ARGS[@]}"
+          echo "applied=true" >> "$GITHUB_OUTPUT"
+
       - name: Schedule the job (Cloud Scheduler)
+        if: steps.apply.outputs.applied == 'true'
         env:
           # Via env, not inlined into the script, so the value is never parsed as shell.
           SCHED_CRON: ${{ secrets.SCHED_CRON }}
@@ -106,6 +128,7 @@ jobs:
           fi
 
       - name: Run prod job now and ensure artifacts pushed
+        if: steps.apply.outputs.applied == 'true'
         run: |
           echo "Executing dbt-prod-run and waiting for completion..."
           gcloud run jobs execute dbt-prod-run --region "${{ env.REGION }}" --wait

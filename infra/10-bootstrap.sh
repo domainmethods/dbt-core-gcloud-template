@@ -27,18 +27,6 @@ require_env(){
 }
 
 ensure_api(){ local api="$1"; info "Ensuring API enabled: $api"; gcloud services enable "$api" --project "$PROJECT_ID" >/dev/null; }
-# Optional API enablement that won't fail the script if unavailable in the org/region
-ensure_api_optional(){
-  local api="$1" out rc
-  info "Ensuring API enabled (optional): $api"
-  out=$(gcloud services enable "$api" --project "$PROJECT_ID" 2>&1); rc=$?
-  if [[ $rc -ne 0 ]]; then
-    warn "Optional API enable failed for ${api}. Continuing."
-    if [[ "${DEBUG:-0}" == "1" ]]; then
-      echo "[debug] services.enable error for ${api}: ${out}" >&2
-    fi
-  fi
-}
 ensure_sa(){ local id="$1" dn="$2"; local email="${id}@${PROJECT_ID}.iam.gserviceaccount.com"; if gcloud iam service-accounts describe "$email" --project "$PROJECT_ID" >/dev/null 2>&1; then info "SA exists: $email"; else info "Creating SA: $email"; gcloud iam service-accounts create "$id" --display-name="$dn" --project "$PROJECT_ID"; fi; }
 ensure_ar_repo(){ if gcloud artifacts repositories describe "$AR_REPO" --location "$REGION" --project "$PROJECT_ID" >/dev/null 2>&1; then info "AR repo exists: $AR_REPO"; else info "Creating AR repo: $AR_REPO"; gcloud artifacts repositories create "$AR_REPO" --repository-format=docker --location="$REGION" --description="dbt containers" --project "$PROJECT_ID"; fi }
 ensure_bucket(){
@@ -167,8 +155,6 @@ ensure_api sts.googleapis.com
 ensure_api logging.googleapis.com
 ensure_api monitoring.googleapis.com
 ensure_api bigquerystorage.googleapis.com
-ensure_api_optional notebooks.googleapis.com
-ensure_api_optional dataform.googleapis.com
 
 info "Ensuring service accounts"
 ensure_sa "${CI_SA_ID}" "dbt CI SA"
@@ -201,8 +187,7 @@ ensure_project_binding roles/bigquery.jobUser "serviceAccount:${CI_SA_EMAIL}"
 ensure_project_binding roles/bigquery.jobUser "serviceAccount:${PROD_SA_EMAIL}"
 # Allow CI to create datasets for ephemeral PR runs
 ensure_project_binding roles/bigquery.user "serviceAccount:${CI_SA_EMAIL}"
-# Allow both CI and PROD service accounts to push to Artifact Registry
-ensure_project_binding roles/artifactregistry.writer "serviceAccount:${CI_SA_EMAIL}"
+# The release workflow publishes images with the production service account.
 ensure_project_binding roles/artifactregistry.writer "serviceAccount:${PROD_SA_EMAIL}"
 ensure_project_binding roles/logging.logWriter "serviceAccount:${PROD_SA_EMAIL}"
 
@@ -294,37 +279,32 @@ add_project_binding_soft(){
   fi
 }
 
-# Project-level roles required for dbt service accounts
+# Common BigQuery project roles for dbt runs
 DBT_USER_ROLES=(
   roles/bigquery.user
   roles/bigquery.readSessionUser
   roles/bigquery.jobUser
-  # Additional roles commonly useful for data/ML workflows
-  roles/aiplatform.notebookRuntimeUser
-  roles/dataform.codeCreator
-  roles/aiplatform.colabEnterpriseUser
+  roles/bigquery.dataViewer
 )
-
-# Optional: allow extra project roles via env (space-separated list)
-if [[ "${ENABLE_EXTRA_PROJECT_ROLES:-false}" == "true" && -n "${EXTRA_PROJECT_ROLES:-}" ]]; then
-  # shellcheck disable=SC2206
-  EXTRA_ROLES_ARR=( ${EXTRA_PROJECT_ROLES} )
-  DBT_USER_ROLES+=("${EXTRA_ROLES_ARR[@]}")
-fi
-
-# Add project-level BigQuery Data Viewer for cross-dataset access
-DBT_USER_ROLES+=(roles/bigquery.dataViewer)
-
-# Optionally include project-level Data Editor when prod is not read-only
-if [[ "${PROD_READ_ONLY:-true}" != "true" ]]; then
-  DBT_USER_ROLES+=(roles/bigquery.dataEditor)
-fi
 
 info "Ensuring project-level roles for dbt service accounts"
 for role in "${DBT_USER_ROLES[@]}"; do
   add_project_binding_soft "$role" "serviceAccount:${CI_SA_EMAIL}"
   add_project_binding_soft "$role" "serviceAccount:${PROD_SA_EMAIL}"
 done
+
+if [[ "${PROD_READ_ONLY:-true}" == "false" ]]; then
+  add_project_binding_soft roles/bigquery.dataEditor "serviceAccount:${CI_SA_EMAIL}"
+  add_project_binding_soft roles/bigquery.dataEditor "serviceAccount:${PROD_SA_EMAIL}"
+fi
+
+if [[ "${ENABLE_EXTRA_PROJECT_ROLES:-false}" == "true" && -n "${EXTRA_PROJECT_ROLES:-}" ]]; then
+  read -r -a extra_roles <<< "$EXTRA_PROJECT_ROLES"
+  for role in "${extra_roles[@]}"; do
+    add_project_binding_soft "$role" "serviceAccount:${CI_SA_EMAIL}"
+    add_project_binding_soft "$role" "serviceAccount:${PROD_SA_EMAIL}"
+  done
+fi
 
 # Operator (human) principal
 operator_email_resolved="${OPERATOR_EMAIL:-}"
