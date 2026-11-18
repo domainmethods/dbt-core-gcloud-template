@@ -293,6 +293,24 @@ ensure_project_binding roles/run.developer "serviceAccount:${PROD_SA_EMAIL}" "$P
 # Cloud Scheduler has only admin/viewer predefined roles; admin needed to create/update jobs
 ensure_project_binding roles/cloudscheduler.admin "serviceAccount:${PROD_SA_EMAIL}" "$PROD_PROJECT_ID"
 
+# Run Developer can read job IAM. Release-first installs also need to add the invoker after creating the job.
+release_iam_role=dbtReleaseJobIam
+role_args=(--project "$PROD_PROJECT_ID" --format=json)
+if ! role_def=$(gcloud iam roles describe "$release_iam_role" "${role_args[@]}" 2>/dev/null); then
+  role_def=$(gcloud iam roles create "$release_iam_role" --title="dbt release job IAM" \
+    --permissions=run.jobs.setIamPolicy --stage=GA "${role_args[@]}")
+fi
+if ! jq -e '.includedPermissions == ["run.jobs.setIamPolicy"] and .stage != "DISABLED" and .deleted != true' \
+    <<< "$role_def" >/dev/null; then
+  echo "[error] $release_iam_role must be enabled and contain only run.jobs.setIamPolicy." >&2
+  exit 1
+fi
+invoker_changes_only="api.getAttribute('iam.googleapis.com/modifiedGrantsByRole', []).hasOnly(['roles/run.invoker'])"
+gcloud projects add-iam-policy-binding "$PROD_PROJECT_ID" \
+  --member="serviceAccount:${PROD_SA_EMAIL}" \
+  --role="projects/${PROD_PROJECT_ID}/roles/${release_iam_role}" \
+  --condition="^|^expression=${invoker_changes_only}|title=dbtSchedulerInvoker" --quiet >/dev/null
+
 # Permit the deployer identity to set the runtime service account when deploying the job
 # (required by Cloud Run to use --service-account). Here we allow the PROD SA to act as itself.
 ensure_sa_binding "$PROD_SA_EMAIL" roles/iam.serviceAccountUser "serviceAccount:${PROD_SA_EMAIL}" "$PROJECT_ID"

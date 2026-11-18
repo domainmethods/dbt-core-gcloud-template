@@ -11,9 +11,8 @@ import unittest
 import yaml
 
 
-WORKFLOW = yaml.safe_load(
-    (Path(__file__).resolve().parents[2] / ".github/workflows/release.yml").read_text()
-)
+REPO_ROOT = Path(__file__).resolve().parents[2]
+WORKFLOW = yaml.safe_load((REPO_ROOT / ".github/workflows/release.yml").read_text())
 STEPS = {
     step["name"]: step
     for step in WORKFLOW["jobs"]["build-and-deploy"]["steps"]
@@ -33,6 +32,8 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.root = Path(temp.name)
         self.calls = self.root / "calls"
         self.output = self.root / "output"
+        self.policy = self.root / "job-policy.json"
+        self.policy.write_text('{"bindings":[]}')
         self.secrets = {
             "GCP_PROJECT_PROD": "production-project",
             "GCP_REGION": "us-central1",
@@ -50,9 +51,28 @@ class ReleaseWorkflowTest(unittest.TestCase):
             "gcloud",
             """
 printf 'gcloud %s\n' "$*" >> "$CALLS"
-if [[ "$* " == "run jobs describe "* ]]; then
-  exit "${DESCRIBE_STATUS:-0}"
-fi
+case "$1 $2 $3" in
+  "run jobs describe") exit "${DESCRIBE_STATUS:-0}" ;;
+  "scheduler jobs describe") exit "${SCHED_DESCRIBE_STATUS:-0}" ;;
+  "run jobs get-iam-policy") cat "$JOB_POLICY"; exit ;;
+  "run jobs add-iam-policy-binding")
+    case "${JOB_IAM_WRITE:-ok}" in
+      denied) echo "run.jobs.setIamPolicy denied" >&2; exit 1 ;;
+      no-op) exit 0 ;;
+    esac
+    while (($#)); do
+      case "$1" in
+        --member) member=$2; shift ;;
+        --role) role=$2; shift ;;
+      esac
+      shift
+    done
+    jq --arg member "$member" --arg role "$role" \
+      '.bindings += [{role:$role,members:[$member]}]' "$JOB_POLICY" > "$JOB_POLICY.tmp"
+    mv "$JOB_POLICY.tmp" "$JOB_POLICY"
+    exit
+    ;;
+esac
 if [[ -n "${JOB_ENV_STATE:-}" && "$1 $2" == "run jobs" && ( "$3" == create || "$3" == update ) ]]; then
   while (($#)); do
     case "$1" in
@@ -107,6 +127,7 @@ jq -r "$4" <<<"$MAIN_BRANCH"
         self.output.write_text("")
         result = subprocess.run(
             ["bash", "-eo", "pipefail", "-c", expand(step["run"])],
+            cwd=REPO_ROOT,
             env={
                 **env,
                 "PATH": f"{self.root}:{os.environ['PATH']}",
@@ -116,6 +137,7 @@ jq -r "$4" <<<"$MAIN_BRANCH"
                 "GITHUB_REPOSITORY": "owner/repo",
                 "GITHUB_SHA": sha,
                 "IMAGE_URI": f"us-central1-docker.pkg.dev/production-project/dbt/runner:{sha}",
+                "JOB_POLICY": str(self.policy),
                 "MAIN_BRANCH": json.dumps({"commit": {"sha": main_sha}, "protected": protected}),
                 **extra_env,
             },
@@ -237,6 +259,51 @@ jq -r "$4" <<<"$MAIN_BRANCH"
         schedule = next(line for line in job_calls if line.startswith("gcloud scheduler jobs update "))
         self.assertIn("projects/production-project/locations/us-central1/jobs/dbt-prod-run:run", schedule)
         self.assertIn("--oauth-service-account-email scheduler@production-project.iam.gserviceaccount.com", schedule)
+
+    def test_release_first_grants_scheduler_invocation_and_updates_idempotently(self):
+        release = self.secrets["GCP_PROD_SA_EMAIL"]
+        scheduler = self.secrets["GCP_SCHEDULER_INVOKER_SA"]
+        self.assertNotEqual(release, scheduler)
+        for status, action in (("1", "create"), ("0", "update")):
+            with self.subTest(action=action):
+                self.calls.write_text("")
+                applied = self.step(APPLY, DESCRIBE_STATUS=status, CLOUDSDK_CORE_ACCOUNT=release)
+                self.assertEqual(applied.returncode, 0, applied.stderr)
+                scheduled = self.step(SCHEDULE, SCHED_DESCRIBE_STATUS=status, CLOUDSDK_CORE_ACCOUNT=release)
+                self.assertEqual(scheduled.returncode, 0, scheduled.stderr)
+                calls = self.calls.read_text().splitlines()
+                grants = [call for call in calls if "run jobs add-iam-policy-binding " in call]
+                if action == "create":
+                    self.assertEqual(len(grants), 1, calls)
+                    grant = grants[0]
+                    self.assertIn(f"--member serviceAccount:{scheduler}", grant)
+                    self.assertIn("--role roles/run.invoker", grant)
+                    self.assertNotIn(release, grant)
+                else:
+                    self.assertEqual(grants, [])
+                iam_reads = [i for i, call in enumerate(calls) if "run jobs get-iam-policy " in call]
+                self.assertEqual(len(iam_reads), 2 if action == "create" else 1, calls)
+                scheduler_read = next(i for i, call in enumerate(calls) if "scheduler jobs describe " in call)
+                self.assertLess(iam_reads[-1], scheduler_read)
+                self.assertIn(f"scheduler jobs {action} http dbt-prod-nightly", calls[-1])
+                self.assertIn(f"--oauth-service-account-email {scheduler}", calls[-1])
+                self.assertEqual(json.loads(self.policy.read_text()), {"bindings": [
+                    {"role": "roles/run.invoker", "members": [f"serviceAccount:{scheduler}"]},
+                ]})
+
+    def test_schedule_is_blocked_when_exact_invoker_binding_cannot_be_verified(self):
+        release_member = f"serviceAccount:{self.secrets['GCP_PROD_SA_EMAIL']}"
+        scheduler_member = f"serviceAccount:{self.secrets['GCP_SCHEDULER_INVOKER_SA']}"
+        self.policy.write_text(json.dumps({"bindings": [
+            {"role": "roles/run.invoker", "members": [release_member]},
+            {"role": "roles/run.invoker", "members": [scheduler_member], "condition": {"expression": "false"}},
+        ]}))
+        for outcome in ("denied", "no-op"):
+            with self.subTest(outcome=outcome):
+                self.calls.write_text("")
+                result = self.step(SCHEDULE, JOB_IAM_WRITE=outcome)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("scheduler jobs ", self.calls.read_text())
 
 
 if __name__ == "__main__":
