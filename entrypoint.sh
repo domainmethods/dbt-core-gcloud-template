@@ -76,13 +76,16 @@ echo "Running dbt build --target ${DBT_TARGET} ${DBT_BUILD_ARGS}"
 BUILD_EXIT=0
 dbt ${DBT_NO_COLOR_FLAG} --log-format json build --target "${DBT_TARGET}" ${DBT_BUILD_ARGS} || BUILD_EXIT=$?
 
-# Later dbt commands rewrite target/run_results.json, so keep the build's copy
-# for the summary and the upload below.
-export DBT_RUN_RESULTS_PATH=""
-if [[ -f target/run_results.json ]]; then
-  DBT_RUN_RESULTS_PATH="$(mktemp)"
-  cp target/run_results.json "${DBT_RUN_RESULTS_PATH}"
-fi
+# Freshness and docs can overwrite the build artifacts in target/.
+build_artifacts_dir="$(mktemp -d)"
+trap 'rm -rf -- "${build_artifacts_dir}"' EXIT
+export DBT_RUN_RESULTS_PATH="${build_artifacts_dir}/run_results.json"
+export DBT_BUILD_MANIFEST_PATH="${build_artifacts_dir}/manifest.json"
+for artifact in run_results.json manifest.json; do
+  if [[ -f "target/${artifact}" ]]; then
+    cp "target/${artifact}" "${build_artifacts_dir}/"
+  fi
+done
 
 # Optional source freshness
 FRESHNESS_EXIT=0
@@ -109,32 +112,27 @@ if [[ "${GENERATE_DOCS:-false}" == "true" && "${BUILD_EXIT}" -eq 0 ]]; then
   if [[ "${DOCS_EXIT}" -ne 0 ]]; then
     echo "dbt docs generate failed (exit ${DOCS_EXIT}); skipping docs upload" >&2
   else
-    echo "Docs generated at ./target/index.html"
-    # Prefer DBT_DOCS_BUCKET; fall back to DBT_ARTIFACTS_BUCKET if not set
-    EXPORT_DOCS_BUCKET="${DBT_DOCS_BUCKET:-${DBT_ARTIFACTS_BUCKET:-}}"
-    if [[ -n "${EXPORT_DOCS_BUCKET}" ]]; then
-      echo "Uploading docs to gs://${EXPORT_DOCS_BUCKET}/index.html"
-      python scripts/lib/upload_docs.py || DOCS_EXIT=$?
-    fi
+    python scripts/lib/upload_docs.py || DOCS_EXIT=$?
   fi
 fi
 
 # Upload core artifacts to artifacts bucket for Slim CI deferral
 export BUILD_EXIT
+ARTIFACTS_EXIT=0
 if [[ -n "${DBT_ARTIFACTS_BUCKET:-}" ]]; then
   echo "Uploading manifest.json, run_results.json, and sources.json (if present) to gs://${DBT_ARTIFACTS_BUCKET}/prod/"
-  python scripts/lib/upload_artifacts.py
+  python scripts/lib/upload_artifacts.py || ARTIFACTS_EXIT=$?
 fi
 
-if [[ "${RUN_POST_HOOK:-false}" == "true" && "${BUILD_EXIT}" -eq 0 && "${FRESHNESS_EXIT}" -eq 0 ]]; then
+if [[ "${RUN_POST_HOOK:-false}" == "true" && "${BUILD_EXIT}" -eq 0 && "${FRESHNESS_EXIT}" -eq 0 && "${ARTIFACTS_EXIT}" -eq 0 ]]; then
   echo "Running post_run.py ..."
   python hooks/post_run.py
 fi
 
 # Propagate the first failure to Cloud Run
-for STEP_EXIT in "${BUILD_EXIT}" "${FRESHNESS_EXIT}" "${DBT_EXIT}" "${DOCS_EXIT}"; do
+for STEP_EXIT in "${BUILD_EXIT}" "${FRESHNESS_EXIT}" "${DBT_EXIT}" "${DOCS_EXIT}" "${ARTIFACTS_EXIT}"; do
   if [[ "${STEP_EXIT}" -ne 0 ]]; then
-    echo "dbt build=${BUILD_EXIT} freshness=${FRESHNESS_EXIT} summary=${DBT_EXIT} docs=${DOCS_EXIT}; exiting ${STEP_EXIT}" >&2
+    echo "dbt build=${BUILD_EXIT} freshness=${FRESHNESS_EXIT} summary=${DBT_EXIT} docs=${DOCS_EXIT} artifacts=${ARTIFACTS_EXIT}; exiting ${STEP_EXIT}" >&2
     exit "${STEP_EXIT}"
   fi
 done

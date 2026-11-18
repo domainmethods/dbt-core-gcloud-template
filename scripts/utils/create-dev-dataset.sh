@@ -14,6 +14,7 @@ ROOT_DIR=$(cd "$(dirname "$0")"/../.. && pwd)
 cd "$ROOT_DIR"
 
 source infra/.env
+source scripts/lib/bigquery_acl.sh
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -55,35 +56,11 @@ else
   bq --location="${BQ_LOCATION}" mk -d --description "Dev dataset for ${DEV_EMAIL}" "${PROJECT_ID}:${DEV_DS}"
 fi
 
-add_ds () {
-  local dataset="$1" role="$2" member="$3"
-  local tmp="${TMP_DIR}/ds_old.json"
-  local tmp2="${TMP_DIR}/ds_new.json"
-  if ! bq get-iam-policy --format=prettyjson "${PROJECT_ID}:${dataset}" > "${tmp}" 2>/dev/null; then
-    echo '{"bindings":[],"version":1}' > "${tmp}"
-  fi
-  jq --arg role "${role}" --arg member "${member}" '
-    .bindings |= (. // []) |
-    if any(.bindings[]?; .role==$role) then
-      .bindings |= map(if .role==$role then (.members += [$member] | .members |= unique) else . end)
-    else
-      .bindings += [{"role": $role, "members": [$member]}]
-    end
-  ' "${tmp}" > "${tmp2}"
-  if ! diff -q "${tmp}" "${tmp2}" >/dev/null 2>&1; then
-    bq set-iam-policy "${PROJECT_ID}:${dataset}" "${tmp2}" >/dev/null
-    info "Updated dataset IAM: ${dataset} ${role} += ${member}"
-  else
-    info "Dataset IAM already set: ${dataset} ${role} has ${member}"
-  fi
-}
-
-add_ds "${DEV_DS}" "roles/bigquery.dataEditor" "user:${DEV_EMAIL}"
-
 CI_SA_EMAIL="${CI_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
 PROD_SA_EMAIL="${PROD_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
-add_ds "${DEV_DS}" "roles/bigquery.dataViewer" "serviceAccount:${CI_SA_EMAIL}"
-add_ds "${DEV_DS}" "roles/bigquery.dataViewer" "serviceAccount:${PROD_SA_EMAIL}"
+add_dataset_acl_entry "${PROJECT_ID}:${DEV_DS}" WRITER "${DEV_EMAIL}"
+add_dataset_acl_entry "${PROJECT_ID}:${DEV_DS}" READER "${CI_SA_EMAIL}"
+add_dataset_acl_entry "${PROJECT_ID}:${DEV_DS}" READER "${PROD_SA_EMAIL}"
 
 if (( GRANT_JOB_USER == 1 )); then
   if gcloud projects get-iam-policy "${PROJECT_ID}" --format=json | jq -e --arg m "user:${DEV_EMAIL}" '.bindings[]? | select(.role=="roles/bigquery.jobUser") | .members[]? | select(.==$m)' >/dev/null 2>&1; then

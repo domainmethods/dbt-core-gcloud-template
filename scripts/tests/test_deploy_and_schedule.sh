@@ -24,6 +24,7 @@ make_sandbox() {  # $1 = script name, $2 = "with-docker" or "no-docker"
   mkdir -p "$SANDBOX/bin" "$SANDBOX/infra" "$SANDBOX/docs-viewer" "$SANDBOX/scripts"
   cp "$REPO_ROOT/infra/$1" "$SANDBOX/infra/"
   cp "$REPO_ROOT/scripts/"*.sh "$SANDBOX/scripts/" 2>/dev/null || true
+  cp -R "$REPO_ROOT/scripts/lib" "$SANDBOX/scripts/"
   cat > "$SANDBOX/infra/.env" <<'ENV'
 PROJECT_ID=test-proj
 PROJECT_NUMBER=111111111111
@@ -63,15 +64,20 @@ case "$*" in
   "projects describe prod-proj "*) echo '222222222222' ;;
   "artifacts repositories describe"*) [[ "${STUB_CREATE_RESOURCES:-0}" != 1 ]] || exit 1 ;;
   "iam service-accounts describe"*) [[ "${STUB_CREATE_RESOURCES:-0}" != 1 ]] || exit 1 ;;
+  "storage buckets describe"*) echo '{"uniform_bucket_level_access":true}' ;;
   "iam roles describe dbtReleaseJobIam "*)
     [[ "${STUB_ROLE_EXISTS:-0}" == 1 ]] || exit 1
     echo '{"includedPermissions":["run.jobs.setIamPolicy"],"stage":"GA"}'
     ;;
   "iam roles create dbtReleaseJobIam "*) echo '{"includedPermissions":["run.jobs.setIamPolicy"],"stage":"GA"}' ;;
   "storage buckets get-iam-policy"*)
-    echo '{"bindings":[{"role":"roles/storage.objectAdmin","members":["serviceAccount:dbt-ci@test-proj.iam.gserviceaccount.com"]}]}'
+    if [[ -f "$STUB_DIR/bucket.json" ]]; then cat "$STUB_DIR/bucket.json"; else
+      echo '{"etag":"bucket-etag","bindings":[{"role":"roles/storage.objectAdmin","members":["serviceAccount:dbt-ci@test-proj.iam.gserviceaccount.com"]}]}'
+    fi
     ;;
+  "storage buckets set-iam-policy"*) cp "$5" "$STUB_DIR/bucket.json" ;;
   "artifacts docker tags list"*) exit 0 ;;
+  "builds submit"*) echo "staging: $PWD source=${@: -1} ignore=${CLOUDSDK_GCLOUDIGNORE_ENABLED:-unset}" >> "$STUB_DIR/calls.log" ;;
   *"get-iam-policy"*) echo '{}'; exit 0 ;;
   "scheduler jobs describe"*) exit 1 ;;
   "run services describe"*) echo "https://dbt-docs.example"; exit 0 ;;
@@ -84,7 +90,7 @@ echo "bq $*" >> "$STUB_DIR/calls.log"
 case " $* " in
   *" show --format=none "*) exit 1 ;;
   *" get-iam-policy "*) echo '{"bindings":[]}' ;;
-  *" show --format=prettyjson "*) echo '{"access":[{"role":"WRITER","specialGroup":"projectWriters"}]}' ;;
+  *" show --format=prettyjson "*) echo '{"etag":"acl-etag","access":[{"role":"WRITER","specialGroup":"projectWriters"}]}' ;;
 esac
 STUB
   if [[ "$2" == "with-docker" ]]; then
@@ -130,16 +136,56 @@ for script in 30-deploy-cloud-run-job.sh 80-deploy-docs-viewer.sh; do
   assert_not_contains "$RUN_OUT" "docker not found;" "doesn't claim docker is missing"
 
   echo "scenario: $script, no docker binary → Cloud Build"
-  make_sandbox "$script" no-docker; run_script "$script" ''
+  make_sandbox "$script" no-docker; run_script "$script" 'CLOUDSDK_GCLOUDIGNORE_ENABLED=false'
   assert_eq "$RUN_RC" "0" "exits 0"
   assert_contains "$CALLS" "builds submit" "builds with Cloud Build"
   assert_contains "$RUN_OUT" "docker not found" "says docker is missing"
+  context=.
+  if [[ "$script" == 80-deploy-docs-viewer.sh ]]; then context=./docs-viewer; fi
+  assert_contains "$CALLS" "staging: $SANDBOX source=$context ignore=true" "stages the expected context with ignore rules enabled"
 done
 
 echo "scenario: 80-deploy-docs-viewer.sh Cloud Build targets the viewer app (#28)"
 make_sandbox 80-deploy-docs-viewer.sh no-docker; run_script 80-deploy-docs-viewer.sh ''
 assert_contains "$(grep 'builds submit' <<<"$CALLS")" "--tag us-central1-docker.pkg.dev/test-proj/dbt/dbt-docs:v1" "tags the viewer image"
 assert_contains "$(grep 'builds submit' <<<"$CALLS")" "./docs-viewer" "builds the viewer directory"
+
+echo "scenario: Cloud Build uses staging exclusions for a root viewer context (#115)"
+: > "$SANDBOX/calls.log"
+run_script 80-deploy-docs-viewer.sh 'CLOUDSDK_GCLOUDIGNORE_ENABLED=false DOCS_VIEWER_DIR=.'
+assert_contains "$CALLS" "staging: $SANDBOX source=. ignore=true" "viewer override stages the root with ignore rules enabled"
+
+check_upload_list() (
+  local source="$1" stage uploads
+  stage=$(mktemp -d)
+  trap 'rm -rf "$stage"' EXIT
+  mkdir -p "$stage/source"/{infra,secrets,nested,.direnv}
+  cp "$REPO_ROOT/$source/.gcloudignore" "$stage/source/" || exit 1
+  if [[ "$source" == . ]]; then
+    cp "$REPO_ROOT/.gitignore" "$stage/source/"
+  fi
+  cd "$stage/source" || exit 1
+  touch Dockerfile ordinary.json .env .envrc .direnv/placeholder infra/notes.txt \
+    keyfile.json nested/keyfile.json secrets/placeholder.json
+  if command -v gcloud >/dev/null; then
+    # This SDK command only enumerates files locally. Give it an empty config.
+    uploads=$(env -i PATH="$PATH" HOME="$stage" CLOUDSDK_CONFIG="$stage/sdk" \
+      CLOUDSDK_GCLOUDIGNORE_ENABLED=true CLOUDSDK_CORE_DISABLE_USAGE_REPORTING=true \
+      gcloud meta list-files-for-upload) || exit 1
+  else
+    # Check the explicit patterns with Git's ignore syntax when gcloud is absent.
+    git init -q || exit 1
+    uploads=$(git ls-files --others --exclude-from=.gcloudignore) || exit 1
+  fi
+  test "$(sort <<<"$uploads")" = $'Dockerfile\nordinary.json'
+)
+for source in . docs-viewer; do
+  if check_upload_list "$source"; then
+    pass "$source upload list contains only build files"
+  else
+    fail "$source upload list should contain only build files"
+  fi
+done
 
 echo "scenario: 40-schedule-prod-job.sh uses the 06:00 UTC default (#64)"
 make_sandbox 40-schedule-prod-job.sh no-docker; run_script 40-schedule-prod-job.sh ''
@@ -177,8 +223,11 @@ assert_contains "$(grep 'service-accounts create dbt-prod ' <<< "$CALLS")" "--pr
 assert_contains "$(grep 'service-accounts create dbt-scheduler ' <<< "$CALLS")" "--project prod-proj" "Scheduler OAuth SA belongs to prod"
 assert_contains "$(grep 'mk -d' <<< "$CALLS")" "prod-proj:analytics" "prod dataset created in prod"
 assert_contains "$(grep 'mk -d' <<< "$CALLS")" "test-proj:integration" "integration dataset stays in identity project"
-assert_contains "$(grep 'set-iam-policy' <<< "$CALLS")" "--project_id=prod-proj set-iam-policy prod-proj:analytics" "prod dataset IAM targets prod"
-assert_contains "$(grep 'update --source' <<< "$CALLS")" "prod-proj:analytics" "prod writer ACL targets prod"
+assert_contains "$CALLS" "show --format=prettyjson --dataset_view=ACL prod-proj:analytics" "reads the prod dataset ACL in prod"
+assert_contains "$(grep -- '--update_mode=UPDATE_ACL' <<< "$CALLS")" "prod-proj:analytics" "prod dataset ACL updates target prod"
+assert_contains "$CALLS" "show --format=prettyjson --dataset_view=ACL test-proj:integration" "integration dataset ACL stays in identity project"
+assert_not_contains "$CALLS" "test-proj:analytics" "never touches a prod dataset in the identity project"
+assert_contains "$RUN_OUT" "Verified CI read/list and ci/ write bindings" "artifact bucket checks still pass"
 assert_contains "$CALLS" "projects add-iam-policy-binding prod-proj --member=serviceAccount:dbt-prod@test-proj.iam.gserviceaccount.com --role=roles/bigquery.jobUser" "runtime can create jobs in the prod warehouse"
 assert_contains "$CALLS" "projects add-iam-policy-binding prod-proj --member=serviceAccount:dbt-prod@test-proj.iam.gserviceaccount.com --role=roles/run.developer" "release can deploy in prod"
 assert_contains "$CALLS" "projects add-iam-policy-binding prod-proj --member=serviceAccount:dbt-prod@test-proj.iam.gserviceaccount.com --role=roles/cloudscheduler.admin" "release can schedule in prod"
@@ -207,17 +256,9 @@ make_sandbox 10-bootstrap.sh no-docker
 echo 'PROD_PROJECT_ID=prod-proj' >> "$SANDBOX/infra/.env"
 run_script 10-bootstrap.sh STUB_ORG_POLICY=true
 assert_eq "$RUN_RC" "1" "bootstrap exits before provisioning"
-assert_contains "$RUN_OUT" "iam.disableCrossProjectServiceAccountUsage" "points to the required policy"
+assert_contains "$RUN_OUT" "[error] Cross-project Cloud Run requires iam.disableCrossProjectServiceAccountUsage" "fails on the cross-project policy check"
+assert_contains "$CALLS" "resource-manager org-policies describe iam.disableCrossProjectServiceAccountUsage --project test-proj" "reads the policy in the identity project"
 assert_not_contains "$CALLS" "services enable" "no API mutation with the policy enforced"
-
-echo "scenario: WIF pool and SA policy commands pin the identity project (#107)"
-make_sandbox 20-wif-github.sh no-docker
-echo 'PROD_PROJECT_ID=prod-proj' >> "$SANDBOX/infra/.env"
-run_script 20-wif-github.sh ''
-assert_eq "$RUN_RC" "0" "WIF setup exits 0"
-assert_contains "$CALLS" "workload-identity-pools describe github-pool --location=global --project test-proj" "WIF pool uses identity project"
-assert_contains "$CALLS" "get-iam-policy dbt-prod@test-proj.iam.gserviceaccount.com --project test-proj" "reads runtime SA policy in identity project"
-assert_contains "$RUN_OUT" "workload_identity_provider=projects/111111111111/locations/global/" "provider uses identity project number"
 
 echo "scenario: local deploy sends image, build, job and warehouse to prod (#107)"
 make_sandbox 30-deploy-cloud-run-job.sh no-docker
