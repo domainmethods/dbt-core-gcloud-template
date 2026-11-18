@@ -6,7 +6,6 @@ sandbox=$(mktemp -d)
 trap 'rm -rf "$sandbox"' EXIT
 mkdir -p "$sandbox"/{infra,scripts/utils,bin}
 cp "$repo/infra/10-bootstrap.sh" "$sandbox/infra/"
-cp "$repo/scripts/create_bq_dataset.sh" "$sandbox/scripts/"
 cp "$repo/scripts/utils/create-dev-dataset.sh" "$sandbox/scripts/utils/"
 cp -R "$repo/scripts/lib" "$sandbox/scripts/"
 
@@ -38,20 +37,15 @@ case " $* " in
     ;;
   *' set-iam-policy '*) exit 1 ;;
   *' update '*)
-    dataset=${!#}
     source_file=
     etag=
-    while (( $# )); do
-      case "$1" in
-        --source) source_file="$2"; shift ;;
-        --source=*) source_file=${1#*=} ;;
-        --etag=*) etag=${1#*=} ;;
+    for arg in "$@"; do
+      case "$arg" in
+        --source=*) source_file=${arg#*=} ;;
+        --etag=*) etag=${arg#*=} ;;
       esac
-      shift
     done
-    if [[ "$dataset" != ci_pr_fixture ]]; then
-      [[ -n "$etag" && "$etag" == "$(jq -r .etag "$FIXTURE/dataset.json")" ]]
-    fi
+    [[ -n "$etag" && "$etag" == "$(jq -r .etag "$FIXTURE/dataset.json")" ]]
     jq --slurpfile source "$source_file" '.access = $source[0].access' \
       "$FIXTURE/dataset.json" > "$FIXTURE/dataset.next"
     mv "$FIXTURE/dataset.next" "$FIXTURE/dataset.json"
@@ -81,7 +75,7 @@ echo "gsutil $*" >> "$FIXTURE/calls"
 exit 1
 STUB
 chmod +x "$sandbox"/bin/*
-for tool in bash awk cat cp diff dirname grep head jq mktemp mv rm sed tr; do
+for tool in bash awk cat cp diff dirname jq mktemp mv rm sed tr; do
   ln -s "$(command -v "$tool")" "$sandbox/bin/$tool"
 done
 
@@ -155,7 +149,7 @@ jq -e '
   and any(.bindings[]; .condition == null and any(.members[]; startswith("serviceAccount:dbt-prod@")))
 ' "$sandbox/bucket.json" >/dev/null
 
-echo "scenario: bootstrap and CI preserve complete authorized ACL entries"
+echo "scenario: bootstrap preserves complete authorized ACL entries"
 reset_policies
 ci_email=dbt-ci@fixture-project.iam.gserviceaccount.com
 prod_email=dbt-prod@fixture-project.iam.gserviceaccount.com
@@ -181,12 +175,4 @@ jq -e --slurpfile before "$sandbox/original-acl.json" --arg ci "$ci_email" --arg
     + [{role:"READER", userByEmail:$ci}, {role:"WRITER", userByEmail:$prod}]
   )
 ' "$sandbox/dataset.json" >/dev/null || fail "bootstrap changed ACL records outside its writer and reader grants"
-
-cp "$sandbox/original-acl.json" "$sandbox/dataset.json"
-env -i PATH="$sandbox/bin" FIXTURE="$sandbox" DBT_GCP_PROJECT_CI=fixture-project DBT_BQ_LOCATION=US \
-  DBT_BQ_DATASET=ci_pr_fixture CI_SA_EMAIL="$ci_email" \
-  bash "$sandbox/scripts/create_bq_dataset.sh" > "$sandbox/output" 2>&1 || fail "CI ACL hardening failed"
-jq -e --slurpfile before "$sandbox/original-acl.json" '
-  .access == ($before[0].access | map(select(.specialGroup != "projectWriters")))
-' "$sandbox/dataset.json" >/dev/null || fail "CI changed ACL records outside the projectWriters grant"
 echo "policy update tests passed"

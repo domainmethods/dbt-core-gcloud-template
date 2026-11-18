@@ -66,7 +66,7 @@ run_script() {  # $1 = extra env; sets RUN_OUT, RUN_RC, CALLS
 }
 
 # Optional values: empty in .env means "use the default", so the secret must go.
-OPTIONAL_KEYS="SCHED_CRON"
+OPTIONAL_KEYS="SCHED_CRON DBT_MAX_BYTES_BILLED"
 
 for key in $OPTIONAL_KEYS; do
   echo "scenario: $key set → secret set"
@@ -109,6 +109,22 @@ done
 assert_contains "$CALLS" "gh secret set GCP_WIF_PROVIDER -R owner/repo --body projects/123/locations/global/workloadIdentityPools/github-pool/providers/github-provider" "WIF provider value"
 assert_contains "$CALLS" "gh secret set SCHED_CRON -R owner/repo --body 0 7 * * *" "cron with spaces kept intact"
 assert_contains "$CALLS" "gh secret set GCP_SCHED_REGION -R owner/repo --body us-central1" "scheduler region defaults to REGION"
+
+echo "scenario: release-first runtime settings are published from .env"
+make_sandbox 'GENERATE_DOCS=false
+RUN_FRESHNESS=false
+FRESHNESS_SELECT="source:raw,tag:fresh"
+DBT_MAX_BYTES_BILLED=5000000000000
+DBT_BQ_PRIORITY=batch
+DBT_JOB_EXECUTION_TIMEOUT_SEC=600'
+run_script ''
+assert_eq "$RUN_RC" "0" "exits 0"
+assert_contains "$CALLS" "gh secret set GENERATE_DOCS -R owner/repo --body false" "copies disabled docs"
+assert_contains "$CALLS" "gh secret set RUN_FRESHNESS -R owner/repo --body false" "copies disabled freshness"
+assert_contains "$CALLS" "gh secret set FRESHNESS_SELECT -R owner/repo --body source:raw,tag:fresh" "copies selection as one value"
+assert_contains "$CALLS" "gh secret set DBT_MAX_BYTES_BILLED -R owner/repo --body 5000000000000" "copies billing cap"
+assert_contains "$CALLS" "gh secret set DBT_BQ_PRIORITY -R owner/repo --body batch" "copies priority"
+assert_contains "$CALLS" "gh secret set DBT_JOB_EXECUTION_TIMEOUT_SEC -R owner/repo --body 600" "copies query timeout"
 
 echo "results: passed: $PASS_COUNT, failed: $FAIL_COUNT"
 [[ $FAIL_COUNT -eq 0 ]]

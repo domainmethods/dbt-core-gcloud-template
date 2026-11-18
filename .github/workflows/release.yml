@@ -3,7 +3,12 @@ name: release
 on:
   push:
     branches: [main]
-    paths-ignore: ["README.md"]
+
+# Keep the lock through the immediate Cloud Run execution.
+concurrency:
+  group: production-release
+  queue: max
+  cancel-in-progress: false
 
 env:
   REGION: ${{ secrets.GCP_REGION }}
@@ -60,27 +65,72 @@ jobs:
         run: docker push "$IMAGE_URI"
 
       - name: Create/Update Cloud Run Job
+        id: apply
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROD_PROJECT: ${{ secrets.GCP_PROJECT_PROD }}
+          PROD_SA_EMAIL: ${{ secrets.GCP_PROD_SA_EMAIL }}
+          PROD_DATASET: ${{ secrets.PROD_DATASET }}
+          BQ_LOCATION: ${{ secrets.BQ_LOCATION }}
+          DBT_ARTIFACTS_BUCKET: ${{ secrets.DBT_ARTIFACTS_BUCKET }}
+          DBT_DOCS_BUCKET: ${{ secrets.DBT_DOCS_BUCKET }}
+          GENERATE_DOCS: ${{ secrets.GENERATE_DOCS }}
+          RUN_FRESHNESS: ${{ secrets.RUN_FRESHNESS }}
+          FRESHNESS_SELECT: ${{ secrets.FRESHNESS_SELECT }}
+          DBT_MAX_BYTES_BILLED: ${{ secrets.DBT_MAX_BYTES_BILLED }}
+          DBT_BQ_PRIORITY: ${{ secrets.DBT_BQ_PRIORITY }}
+          DBT_JOB_EXECUTION_TIMEOUT_SEC: ${{ secrets.DBT_JOB_EXECUTION_TIMEOUT_SEC }}
         run: |
           JOB=dbt-prod-run
           set -e
-          COMMON_ARGS=(
-            --image "$IMAGE_URI"
-            --service-account "${{ secrets.GCP_PROD_SA_EMAIL }}"
-            --task-timeout=3600s
-            --set-env-vars "DBT_TARGET=prod,CI=true,DBT_GCP_PROJECT_PROD=${{ secrets.GCP_PROJECT_PROD }},DBT_BQ_DATASET_PROD=${{ secrets.PROD_DATASET }},DBT_BQ_LOCATION=${{ secrets.BQ_LOCATION }},DBT_ARTIFACTS_BUCKET=${{ secrets.DBT_ARTIFACTS_BUCKET }},DBT_DOCS_BUCKET=${{ secrets.DBT_DOCS_BUCKET }},GENERATE_DOCS=true,DBT_PROFILES_DIR=/app/profiles"
-            --region "${{ env.REGION }}"
+          args=(--image "$IMAGE_URI" --region "$REGION")
+          job_env=(
+            DBT_TARGET=prod CI=true
+            "DBT_GCP_PROJECT_PROD=$PROD_PROJECT"
+            "DBT_BQ_DATASET_PROD=$PROD_DATASET"
+            "DBT_BQ_LOCATION=$BQ_LOCATION"
+            "DBT_ARTIFACTS_BUCKET=$DBT_ARTIFACTS_BUCKET"
+            "DBT_DOCS_BUCKET=$DBT_DOCS_BUCKET"
+            "DBT_PROFILES_DIR=$DBT_PROFILES_DIR"
           )
-          # To inject Secret Manager secrets at runtime, add to COMMON_ARGS:
-          #   --set-secrets "API_KEY=api-key-secret:latest,DB_PASS=db-password:latest"
-          # Requires: infra/10-bootstrap.sh grants secretAccessor to the prod SA.
-          if gcloud run jobs describe "$JOB" --region "${{ env.REGION }}" >/dev/null 2>&1; then
-            gcloud run jobs update "$JOB" "${COMMON_ARGS[@]}"
+          if gcloud run jobs describe "$JOB" --region "$REGION" >/dev/null 2>&1; then
+            action=update
+            args+=(--update-env-vars "$(IFS=,; printf '%s' "${job_env[*]}")")
           else
-            gcloud run jobs create "$JOB" "${COMMON_ARGS[@]}" \
-              --memory=2Gi --cpu=1 --max-retries=0
+            action=create
+            job_env+=(
+              "GENERATE_DOCS=${GENERATE_DOCS:-true}"
+              "RUN_FRESHNESS=${RUN_FRESHNESS:-true}"
+              "FRESHNESS_SELECT=${FRESHNESS_SELECT:-}"
+              "DBT_MAX_BYTES_BILLED=${DBT_MAX_BYTES_BILLED:-}"
+              "DBT_BQ_PRIORITY=${DBT_BQ_PRIORITY:-interactive}"
+              "DBT_JOB_EXECUTION_TIMEOUT_SEC=${DBT_JOB_EXECUTION_TIMEOUT_SEC:-}"
+            )
+            # A config file preserves commas and spaces in selectors.
+            env_file=$(mktemp --suffix=.yaml)
+            trap 'rm -f "$env_file"' EXIT
+            jq -n --args '
+              $ARGS.positional | map(index("=") as $i | {key: .[:$i], value: .[$i+1:]}) | from_entries
+            ' "${job_env[@]}" > "$env_file"
+            args+=(--env-vars-file "$env_file" --service-account "$PROD_SA_EMAIL"
+              --task-timeout=3600s --memory=2Gi --cpu=1 --max-retries=0)
           fi
 
+          # Read the live ref after selecting the action and before changing the job.
+          current_sha=$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
+          if [[ ! "$current_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Could not verify the head of main."
+            exit 1
+          fi
+          if [[ "$GITHUB_SHA" != "$current_sha" ]]; then
+            echo "::notice::Skipping superseded release $GITHUB_SHA. Current main is $current_sha."
+            exit 0
+          fi
+          gcloud run jobs "$action" "$JOB" "${args[@]}"
+          echo "applied=true" >> "$GITHUB_OUTPUT"
+
       - name: Schedule the job (Cloud Scheduler)
+        if: steps.apply.outputs.applied == 'true'
         env:
           # Via env, not inlined into the script, so the value is never parsed as shell.
           SCHED_CRON: ${{ secrets.SCHED_CRON }}
@@ -106,6 +156,7 @@ jobs:
           fi
 
       - name: Run prod job now and ensure artifacts pushed
+        if: steps.apply.outputs.applied == 'true'
         run: |
           echo "Executing dbt-prod-run and waiting for completion..."
           gcloud run jobs execute dbt-prod-run --region "${{ env.REGION }}" --wait
