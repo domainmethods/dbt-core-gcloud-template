@@ -66,5 +66,12 @@ else
   fail "the CI dataset creation script exited unsuccessfully"
 fi
 
+echo "scenario 4: CI uploads stay under the managed ci/ prefix"
+upload=$(wf "next(s['run'] for s in w['jobs']['bigquery-ci']['steps'] if s.get('name', '').startswith('Upload CI artifacts'))")
+assert_contains "$upload" 'gsutil ls "gs://${DBT_ARTIFACTS_BUCKET}/"' "bucket preflight uses object listing"
+assert_contains "$upload" 'artifact_uri="gs://${DBT_ARTIFACTS_BUCKET}/ci/pr-' "upload URI starts with ci/"
+assert_contains "$upload" 'parallel_composite_upload_threshold=0 -m rsync -r ./target "${artifact_uri}/"' "rsync targets ci/ without composite uploads"
+assert_contains "$upload" 'parallel_composite_upload_threshold=0 cp target/manifest.json "${artifact_uri}/manifest.json"' "manifest copy targets ci/ without composite uploads"
+
 echo "results: passed: $PASS_COUNT, failed: $FAIL_COUNT"
 [[ $FAIL_COUNT -eq 0 ]]
