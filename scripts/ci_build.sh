@@ -8,7 +8,7 @@ set -euo pipefail
 #                                                     → full build (no --defer)
 #   3. Manifest available, git-diff scope only         → build "$BUILD_SELECT" --defer
 #                                                        (unchanged ancestors defer to prod)
-#   4. Manifest available, macro/config change alongside
+#   4. Manifest available, macro/config/YAML change alongside
 #      model changes                                   → union "$BUILD_SELECT state:modified+"
 #                                                        --defer
 #   5. Manifest available, macro/config/YAML-only change
@@ -103,7 +103,7 @@ elif [[ "${NEEDS_FALLBACK:-false}" == "false" && -n "${BUILD_SELECT:-}" ]]; then
   dbt build --target ci --select "${BUILD_SELECT}" --defer --state prod_state --exclude-resource-type test
   CI_SELECT="${BUILD_SELECT}"; CI_DEFER="--defer --state prod_state"
 elif [[ "${NEEDS_FALLBACK:-false}" == "true" && -n "${BUILD_SELECT:-}" ]]; then
-  # Macro/config change alongside model changes → union git scope with state:modified+.
+  # Macro/config/YAML change alongside model changes → union git scope with state:modified+.
   SEL="${BUILD_SELECT} state:modified+"
   echo "Strategy: git-diff + state:modified+ combined — ${SEL}"
   dbt build --target ci --select "${SEL}" --defer --state prod_state --exclude-resource-type test

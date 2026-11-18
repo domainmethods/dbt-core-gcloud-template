@@ -40,5 +40,31 @@ assert_contains "$(wf "' '.join(s.get('run', '') for s in w['jobs']['yamllint'][
 assert_eq "$(wf "any('dbt' in s.get('run', '') for s in w['jobs']['yamllint']['steps'])")" "False" "no dbt install in the yamllint job"
 assert_contains "$(wf "str([s.get('env', {}) for s in w['jobs']['lint']['steps']])")" "'SKIP': 'yamllint'" "lint job no longer runs yamllint twice"
 
+echo "scenario 3: the warehouse job uses the configured BigQuery location (#97)"
+assert_eq "$(wf "w['jobs']['bigquery-ci'].get('env', {}).get('DBT_BQ_LOCATION')")" \
+  "\${{ secrets.BQ_LOCATION || 'US' }}" "warehouse job resolves BQ_LOCATION with a US default"
+assert_eq "$(wf "w['jobs']['lint']['steps'][-1]['env']['DBT_BQ_LOCATION']")" "US" \
+  "SQLFluff still uses the offline US lint profile"
+profile_location=$(python3 -c 'import sys, yaml
+print(yaml.safe_load(open(sys.argv[1]))["dbt_gcloud"]["outputs"]["ci"]["location"])' "$REPO_ROOT/profiles/profiles.yml")
+assert_eq "$profile_location" "{{ env_var('DBT_BQ_LOCATION', 'US') }}" "CI profile reads the warehouse job environment"
+
+sandbox=$(mktemp -d)
+trap 'rm -rf "$sandbox"' EXIT
+printf '%s\n' '#!/usr/bin/env bash' 'echo "$*" >> "$BQ_CALL_LOG"' > "$sandbox/bq"
+chmod +x "$sandbox/bq"
+mkdir "$sandbox/target"
+printf '{"nodes":{}}\n' > "$sandbox/target/manifest.json"
+printf '{"number":97}\n' > "$sandbox/event.json"
+if (cd "$sandbox" && PATH="$sandbox:$PATH" BQ_CALL_LOG="$sandbox/bq.log" \
+    GITHUB_ACTIONS=true GITHUB_EVENT_NAME=pull_request GITHUB_EVENT_PATH="$sandbox/event.json" \
+    GITHUB_RUN_ID=123 GITHUB_RUN_ATTEMPT=1 GITHUB_REPOSITORY_ID=999 DBT_TARGET=ci \
+    DBT_GCP_PROJECT_CI=ciproj DBT_BQ_DATASET=ci_pr_97_123_1 DBT_BQ_LOCATION=EU MAKE_DATASET_READONLY=false \
+    bash "$REPO_ROOT/scripts/create_bq_dataset.sh" >/dev/null); then
+  assert_contains "$(cat "$sandbox/bq.log")" "--location=EU mk -d" "bq creates the CI dataset in EU"
+else
+  fail "the CI dataset creation script exited unsuccessfully"
+fi
+
 echo "results: passed: $PASS_COUNT, failed: $FAIL_COUNT"
 [[ $FAIL_COUNT -eq 0 ]]
