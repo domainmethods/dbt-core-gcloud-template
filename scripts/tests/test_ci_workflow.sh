@@ -36,7 +36,7 @@ assert_eq "$(wf "'yamllint' in w['jobs']")" "True" "yamllint job exists"
 assert_eq "$(wf "sorted(w['jobs']['bigquery-ci']['needs'])")" "['lint', 'yamllint']" "bigquery-ci needs lint and yamllint"
 assert_contains "$(wf "' '.join(s.get('run', '') for s in w['jobs']['yamllint']['steps'])")" "yamllint ." "lints the whole repo"
 assert_eq "$(wf "any('dbt' in s.get('run', '') for s in w['jobs']['yamllint']['steps'])")" "False" "no dbt install in the yamllint job"
-assert_contains "$(wf "str([s.get('env', {}) for s in w['jobs']['lint']['steps']])")" "'SKIP': 'yamllint'" "lint job no longer runs yamllint twice"
+assert_eq "$(wf "any('yamllint' in s.get('run', '') for s in w['jobs']['lint']['steps'])")" "False" "lint job does not run yamllint twice"
 
 echo "results: passed: $PASS_COUNT, failed: $FAIL_COUNT"
 [[ $FAIL_COUNT -eq 0 ]]
