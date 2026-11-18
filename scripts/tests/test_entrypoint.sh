@@ -26,6 +26,14 @@ mkdir -p target
 args=" $* "
 case "$args" in
   *" docs generate "*)
+    if [[ "${STUB_DOCS_MISSING_STATIC:-false}" != "true" ]]; then
+      cat > target/static_index.html <<'HTML'
+<script>
+const manifest = {"nodes":{"model.p.a":{"alias":"a"}}};
+const catalog = {"nodes":{"model.p.a":{"columns":{"id":{"name":"id"}}}}};
+</script>
+HTML
+    fi
     echo '{"written_by": "docs", "results": []}' > target/run_results.json
     echo '{"nodes": {"model.p.a": {"alias": "a"}}, "written_by": "docs"}' > target/manifest.json
     echo '<html>docs</html>' > target/index.html
@@ -207,7 +215,9 @@ assert_eq "$RC" "1" "exits with dbt source freshness's code"
 assert_contains "$OUT" '"dbt_summary"' "dbt_summary line emitted"
 assert_contains "$(cat "$SANDBOX/uploads/artifacts/prod/run_results.json" 2>/dev/null)" '"written_by": "build"' "build's run_results.json uploaded"
 assert_file "$SANDBOX/uploads/artifacts/prod/manifest.json" "manifest.json uploaded (the build was green)"
-assert_file "$SANDBOX/uploads/docs/index.html" "docs uploaded"
+uploaded_docs=$(cat "$SANDBOX/uploads/docs/index.html" 2>/dev/null)
+assert_contains "$uploaded_docs" 'const manifest = {"nodes":{"model.p.a":{"alias":"a"}}};' "index.html contains the embedded manifest"
+assert_contains "$uploaded_docs" 'const catalog = {"nodes":{"model.p.a":{"columns":{"id":{"name":"id"}}}}};' "index.html contains the embedded catalog"
 
 echo "scenario: every model built, a data test failed → new manifest published, job still fails"
 run_entrypoint 1 0 STUB_BUILD_MODE=test_fail
@@ -243,6 +253,15 @@ run_entrypoint 0 0 STUB_FAIL_BUCKET=docs
 assert_eq "$RC" "1" "exits with upload_docs.py's code"
 assert_file "$SANDBOX/uploads/artifacts/prod/manifest.json" "manifest.json uploaded"
 assert_file "$SANDBOX/uploads/artifacts/prod/run_results.json" "run_results.json uploaded"
+
+echo "scenario: docs generation returns zero without a standalone page → docs step fails"
+run_entrypoint 0 0 STUB_DOCS_MISSING_STATIC=true
+assert_eq "$RC" "1" "missing standalone docs give the job a non-zero exit"
+assert_contains "$OUT" "dbt docs generate did not write target/static_index.html" "logs the missing standalone page"
+assert_no_file "$SANDBOX/uploads/docs/index.html" "the docs shell was not published"
+assert_file "$SANDBOX/uploads/artifacts/prod/manifest.json" "manifest.json still uploaded"
+assert_file "$SANDBOX/uploads/artifacts/prod/run_results.json" "run_results.json still uploaded"
+assert_file "$SANDBOX/uploads/artifacts/prod/sources.json" "sources.json still uploaded"
 
 echo "scenario: failed build and failed freshness → build's code wins"
 run_entrypoint 1 4

@@ -9,5 +9,4 @@ if [[ -z "${DBT_GCP_PROJECT_CI:-}" || -z "${DBT_BQ_DATASET:-}" ]]; then
   exit 0
 fi
 
-bq rm -r -f -d "${DBT_GCP_PROJECT_CI}:${DBT_BQ_DATASET}" || true
-echo "Dropped dataset ${DBT_GCP_PROJECT_CI}:${DBT_BQ_DATASET}"
+exec bash "$(dirname "$0")/cleanup_ci_datasets.sh" --current-run
