@@ -40,24 +40,51 @@ case "$args" in
       model_alias=build_alias
     fi
     if [[ "${STUB_BUILD_MODE:-}" != missing_manifest ]]; then
-      printf '{"nodes": {"model.p.a": {"alias": "%s"}}}\n' "$model_alias" > target/manifest.json
+      cat > build-manifest.json <<JSON
+{
+  "nodes": {
+    "model.p.a": {"resource_type": "model", "alias": "$model_alias", "config": {"enabled": true, "materialized": "view"}},
+    "model.p.b": {"resource_type": "model", "config": {"enabled": true, "materialized": "table"}},
+    "seed.p.lookup": {"resource_type": "seed", "config": {"enabled": true, "materialized": "seed"}},
+    "snapshot.p.history": {"resource_type": "snapshot", "config": {"enabled": true, "materialized": "snapshot"}},
+    "model.p.inline": {"resource_type": "model", "config": {"enabled": true, "materialized": "ephemeral"}},
+    "test.p.t": {"resource_type": "test", "config": {"enabled": true}}
+  },
+  "disabled": {
+    "model.p.disabled": [{"resource_type": "model", "config": {"enabled": false, "materialized": "table"}}]
+  }
+}
+JSON
+      cp build-manifest.json target/manifest.json
     fi
-    m=$(printf '{"unique_id": "model.p.a", "status": "success", "relation_name": "db.analytics.%s"}' "$model_alias")
-    t='{"unique_id": "test.p.t", "status": "pass"}'
     case "${STUB_BUILD_MODE:-}" in
-      crash)  # parse/compile error: dbt raises before writing run_results.json
-        rm -f target/run_results.json
+      crash|missing_results)
         exit "${STUB_BUILD_EXIT:-0}" ;;
-      missing_results)
-        exit "${STUB_BUILD_EXIT:-0}" ;;
-      test_fail)  # every model built, a data test failed
-        t='{"unique_id": "test.p.t", "status": "fail"}' ;;
-      *)
-        if [[ "${STUB_BUILD_EXIT:-0}" != "0" ]]; then  # a model errored, its child skipped
-          m='{"unique_id": "model.p.a", "status": "error"}, {"unique_id": "model.p.b", "status": "skipped"}'
-        fi ;;
+      bad_manifest)
+        echo '{' > target/manifest.json ;;
     esac
-    echo "{\"written_by\": \"build\", \"results\": [$m, $t]}" > target/run_results.json
+    results=()
+    for uid in model.p.a model.p.b seed.p.lookup snapshot.p.history test.p.t; do
+      name="${uid##*.}"
+      [[ "$args" == *" --exclude $name "* ]] && continue
+      status=success
+      relation="$name"
+      case "$uid" in
+        model.p.a) relation="$model_alias" ;;
+        test.p.t) status=pass ;;
+      esac
+      if [[ "${STUB_BUILD_MODE:-}" == test_fail ]]; then
+        [[ "$uid" == test.p.t ]] && status=fail
+      elif [[ "${STUB_BUILD_EXIT:-0}" != 0 ]]; then
+        case "$uid" in
+          model.p.a) status=error ;;
+          model.p.b) status=skipped ;;
+        esac
+      fi
+      results+=("$(printf '{"unique_id": "%s", "status": "%s", "relation_name": "db.analytics.%s"}' "$uid" "$status" "$relation")")
+    done
+    IFS=,
+    printf '{"written_by": "build", "results": [%s]}\n' "${results[*]}" > target/run_results.json
     exit "${STUB_BUILD_EXIT:-0}" ;;
 esac
 exit 0
@@ -120,7 +147,8 @@ run_entrypoint 0 0 'DBT_BUILD_ARGS=--vars {"alias":"build_alias"}'
 assert_eq "$RC" "0" "exits 0"
 assert_contains "$(cat "$SANDBOX/uploads/artifacts/prod/run_results.json" 2>/dev/null)" '"written_by": "build"' "uploaded run_results.json is the build's"
 assert_contains "$(cat "$SANDBOX/uploads/artifacts/prod/run_results.json" 2>/dev/null)" '"relation_name": "db.analytics.build_alias"' "build results record the overridden alias"
-assert_eq "$(cat "$SANDBOX/uploads/artifacts/prod/manifest.json" 2>/dev/null)" '{"nodes": {"model.p.a": {"alias": "build_alias"}}}' "manifest upload matches the build output"
+cmp -s "$SANDBOX/build-manifest.json" "$SANDBOX/uploads/artifacts/prod/manifest.json" \
+  && pass "manifest upload matches the build output" || fail "manifest upload differs from the build output"
 assert_contains "$(cat "$SANDBOX/target/manifest.json")" '"alias": "a"' "docs regenerated the working manifest with the default alias"
 assert_file "$SANDBOX/uploads/docs/index.html" "docs uploaded"
 
@@ -139,6 +167,28 @@ assert_eq "$RC" "1" "summary exits 1 for missing build results"
 assert_file "$SANDBOX/target/run_results.json" "docs wrote run results"
 assert_no_file "$SANDBOX/uploads/artifacts/prod/run_results.json" "the docs results were not uploaded"
 assert_no_file "$SANDBOX/uploads/artifacts/prod/manifest.json" "manifest stayed unpublished"
+
+for node in model.p.b seed.p.lookup snapshot.p.history; do
+  echo "scenario: successful --exclude ${node##*.} → incomplete build keeps the prior manifest"
+  run_entrypoint 0 0 "DBT_BUILD_ARGS=--exclude ${node##*.}"
+  assert_eq "$RC" "0" "selected build still exits 0"
+  assert_contains "$OUT" "not built: $node (no result)" "logs the relation without a result"
+  assert_no_file "$SANDBOX/uploads/artifacts/prod/manifest.json" "incomplete build manifest was not uploaded"
+  assert_contains "$(cat "$SANDBOX/uploads/artifacts/prod/run_results.json" 2>/dev/null)" '"written_by": "build"' "selected build's results still uploaded"
+  assert_file "$SANDBOX/uploads/artifacts/prod/sources.json" "freshness results still uploaded"
+done
+
+echo "scenario: exclude only a test → every persisted relation still qualifies"
+run_entrypoint 0 0 'DBT_BUILD_ARGS=--exclude t'
+assert_eq "$RC" "0" "build still exits 0"
+assert_file "$SANDBOX/uploads/artifacts/prod/manifest.json" "complete manifest uploaded"
+
+echo "scenario: unreadable build manifest → diagnostics still uploaded"
+run_entrypoint 0 0 STUB_BUILD_MODE=bad_manifest
+assert_eq "$RC" "0" "build still exits 0"
+assert_contains "$OUT" "the build's manifest.json is missing or unreadable" "logs why the manifest was kept"
+assert_no_file "$SANDBOX/uploads/artifacts/prod/manifest.json" "unreadable manifest was not uploaded"
+assert_file "$SANDBOX/uploads/artifacts/prod/run_results.json" "run results still uploaded"
 
 echo "scenario: a model errored → summary and run_results still published, manifest kept, job still fails"
 run_entrypoint 1 0
