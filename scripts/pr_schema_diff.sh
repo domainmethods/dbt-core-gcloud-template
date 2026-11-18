@@ -11,6 +11,7 @@ set -euo pipefail
 #   DBT_BQ_DATASET       (required)
 #   DBT_GCP_PROJECT_PROD (optional, defaults to CI project)
 #   DBT_BQ_DATASET_PROD  (optional, default: analytics)
+#   DBT_BQ_LOCATION     (optional, default: US)
 #   SCHEMA_DIFF_PROD_DATASETS (optional, comma-separated; overrides DBT_BQ_DATASET_PROD)
 #   ARTIFACT_DIR         (optional, default: schema_diff_reports)
 #
@@ -122,7 +123,8 @@ node_to_fqn() {
 bq_json() {
   local project=$1 sql=$2
   local out
-  out=$(bq --project_id="$project" query --nouse_legacy_sql --format=json --maximum_bytes_billed=1000000000 "$sql" 2>&1) || {
+  out=$(bq --project_id="$project" --location="${DBT_BQ_LOCATION:-US}" \
+    query --nouse_legacy_sql --format=json --maximum_bytes_billed=1000000000 "$sql" 2>&1) || {
     echo "$out" >&2
     return 1
   }
