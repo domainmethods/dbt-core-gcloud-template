@@ -595,6 +595,10 @@ Note on INT_DATASET:
 
 ## Release (main → prod container)
 
+The workflow queues production releases through execution. It applies a candidate
+only if its SHA still matches `main` immediately before the job update. Every push
+to `main` triggers a release so the current head can deploy.
+
 **Secrets required**
 
 * `GCP_WIF_PROVIDER`

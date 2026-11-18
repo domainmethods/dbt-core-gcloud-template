@@ -32,6 +32,8 @@ jobs:
       # PyYAML comes with yamllint, which these checks need.
       - name: Check ci.yml gates
         run: bash scripts/tests/test_ci_workflow.sh
+      - name: Test release workflow with CLI stubs
+        run: python3 scripts/tests/test_release_workflow.py
 
   lint:
     runs-on: ubuntu-latest
