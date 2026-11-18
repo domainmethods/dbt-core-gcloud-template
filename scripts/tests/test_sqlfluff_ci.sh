@@ -10,7 +10,7 @@ for tool in dbt sqlfluff jq; do
       echo "test_sqlfluff_ci.sh needs $tool on PATH" >&2
       exit 1
     fi
-    echo "SKIP test_sqlfluff_ci.sh: $tool not on PATH (pip install sqlfluff==3.4.2 to run it)" >&2
+    echo "SKIP test_sqlfluff_ci.sh: $tool not on PATH (needs dbt from make deps, sqlfluff==3.4.2 and jq)" >&2
     exit 0
   }
 done
