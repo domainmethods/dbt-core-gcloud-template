@@ -1,0 +1,12 @@
+.gcloudignore
+.git
+.gitignore
+#!include:.gitignore
+
+# Cloud Build stages source before Docker reads .dockerignore.
+.env
+.envrc
+.direnv/
+infra/
+keyfile.json
+secrets/

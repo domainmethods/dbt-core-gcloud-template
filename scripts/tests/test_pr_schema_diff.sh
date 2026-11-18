@@ -240,8 +240,10 @@ cleanup() { [[ -n "${SANDBOX:-}" && -d "$SANDBOX" ]] && rm -rf "$SANDBOX"; }
 scenario_1() {
   echo "  scenario 1: zero orphans (every prod table covered by the manifest)"
   make_sandbox ok_no_orphans
-  run_diff; local rc=$?
+  DBT_BQ_LOCATION=EU run_diff; local rc=$?
   assert_eq 0 "$rc" "exits 0 when no orphans are found"
+  assert_contains "$(cat "$BQ_CALL_LOG")" "--project_id=ciproj --location=EU query" "CI schema queries run in EU"
+  assert_contains "$(cat "$BQ_CALL_LOG")" "--project_id=prodproj --location=EU query" "prod schema queries run in EU"
   assert_contains "$(cat "$SANDBOX/out/orphans.md")" "Found 0 orphan(s)." "reports zero orphans"
   cleanup
 }
