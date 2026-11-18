@@ -2,10 +2,16 @@
 # Exercises CI lint with dbt and SQLFluff installed and an empty credential environment.
 set -euo pipefail
 
+# sqlfluff is not in requirements.txt (locally it lives in pre-commit's env), so a
+# developer machine may lack it: skip there, but fail in CI where the lint job installs it.
 for tool in dbt sqlfluff jq; do
   command -v "$tool" >/dev/null || {
-    echo "test_sqlfluff_ci.sh needs $tool on PATH (make deps; pip install sqlfluff==3.4.2)" >&2
-    exit 1
+    if [[ "${CI:-}" == "true" || "${GITHUB_ACTIONS:-}" == "true" ]]; then
+      echo "test_sqlfluff_ci.sh needs $tool on PATH" >&2
+      exit 1
+    fi
+    echo "SKIP test_sqlfluff_ci.sh: $tool not on PATH (pip install sqlfluff==3.4.2 to run it)" >&2
+    exit 0
   }
 done
 
