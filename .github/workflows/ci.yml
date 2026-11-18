@@ -44,6 +44,7 @@ jobs:
           bash scripts/tests/test_pr_data_diff.sh
           bash scripts/tests/test_get_changed_models.sh
           bash scripts/tests/test_ci_build.sh
+          bash scripts/tests/test_bootstrap_project_grants.sh
           bash scripts/tests/test_upsert_pr_comment.sh
           bash scripts/tests/test_lookup_prod_manifest.sh
           bash scripts/tests/test_docs_website.sh
