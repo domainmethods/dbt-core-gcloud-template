@@ -27,13 +27,6 @@ mkdir -p target
 args=" $* "
 case "$args" in
   *" docs generate "*)
-    echo '{"written_by": "docs", "results": []}' > target/run_results.json
-    cat > target/index.html <<'HTML'
-<script>
-const manifest = "MANIFEST.JSON INLINE DATA";
-const catalog = "CATALOG.JSON INLINE DATA";
-</script>
-HTML
     if [[ "${STUB_DOCS_MISSING_STATIC:-false}" != "true" ]]; then
       cat > target/static_index.html <<'HTML'
 <script>
@@ -42,6 +35,8 @@ const catalog = {"nodes":{"model.p.a":{"columns":{"id":{"name":"id"}}}}};
 </script>
 HTML
     fi
+    echo '{"written_by": "docs", "results": []}' > target/run_results.json
+    echo '<html>docs</html>' > target/index.html
     exit "${STUB_DOCS_EXIT:-0}" ;;
   *" source freshness "*)
     echo '{"sources": [{"status": "pass"}]}' > target/sources.json
