@@ -56,15 +56,28 @@ cat > "$sandbox/bin/gcloud" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 echo "gcloud $*" >> "$FIXTURE/calls"
+policy="$FIXTURE/bucket.json"
+if [[ "${4:-}" == gs://fixture-artifacts ]]; then policy="$FIXTURE/artifacts.json"; fi
 case "$*" in
+  'storage buckets describe '*--format=json*)
+    if [[ "${FAIL_READ:-}" == nonuniform ]]; then
+      echo '{"uniform_bucket_level_access":false}'
+    else
+      echo '{"uniform_bucket_level_access":true}'
+    fi
+    ;;
   'storage buckets get-iam-policy '*)
-    cat "$FIXTURE/bucket.json"
+    if [[ "${FAIL_READ:-}" == scoped ]]; then
+      jq '.bindings |= map(select(.role != "roles/storage.objectUser"))' "$policy"
+    else
+      cat "$policy"
+    fi
     [[ "${FAIL_READ:-}" != bucket ]]
     ;;
   'storage buckets set-iam-policy '*)
-    etag=$(jq -r .etag "$FIXTURE/bucket.json")
+    etag=$(jq -r .etag "$policy")
     [[ "$etag" != null && "$etag" == "$(jq -r .etag "$5")" ]]
-    cp "$5" "$FIXTURE/bucket.json"
+    cp "$5" "$policy"
     ;;
   *'get-iam-policy'*) echo '{"bindings":[]}' ;;
 esac
@@ -113,6 +126,64 @@ assert_no_write() {
   fi
   [[ $status != 0 ]] || fail "script accepted an unreadable or unversioned policy"
 }
+
+ci_member=serviceAccount:dbt-ci@fixture-project.iam.gserviceaccount.com
+prod_member=serviceAccount:dbt-prod@fixture-project.iam.gserviceaccount.com
+seed_legacy_bucket_writers() {
+  reset_policies
+  jq --arg ci "$ci_member" '
+    .bindings += [{role:"roles/storage.objectAdmin", members:[$ci,"group:publishers@example.test"]}]
+  ' "$sandbox/bucket.json" > "$sandbox/artifacts.json"
+  cp "$sandbox/artifacts.json" "$sandbox/bucket.json"
+}
+
+assert_bucket_grants() {
+  local bucket="$1" policy_file="$2" expected_ci_roles="$3"
+  jq -e --arg ci "$ci_member" --arg prod "$prod_member" --argjson expected "$expected_ci_roles" \
+    --arg scope "resource.type == 'storage.googleapis.com/Object' && resource.name.startsWith('projects/_/buckets/${bucket}/objects/ci/')" \
+    --arg previous_scope "resource.name.endsWith('/fixture')" '
+    def includes($member): (.members | index($member)) != null;
+    def object_admin: .role == "roles/storage.objectAdmin";
+    .etag == "bucket-etag"
+      and any(.bindings[]; object_admin and .condition == null
+        and includes($prod) and includes("group:publishers@example.test"))
+      and any(.bindings[]; object_admin and .condition == {
+        title:"existing", expression:$previous_scope
+      } and .members == ["group:ops@example.test"])
+      and ([.bindings[] | select(includes($ci)) | .role] | sort) == $expected
+      and all(.bindings[] | select(includes($ci));
+        if .role == "roles/storage.objectViewer" then .condition == null
+        else .condition.expression == $scope end)
+  ' "$policy_file" >/dev/null || fail "incorrect or unrelated IAM changes on $bucket"
+}
+
+echo "scenario: CI has list and read access with writes restricted to ci/ in a shared bucket"
+seed_legacy_bucket_writers
+ci_roles='["roles/storage.objectUser","roles/storage.objectViewer"]'
+run_script infra/10-bootstrap.sh || fail "shared-bucket migration failed"
+assert_bucket_grants fixture-docs "$sandbox/bucket.json" "$ci_roles"
+
+echo "scenario: split buckets leave CI with grants on the artifacts bucket only"
+seed_legacy_bucket_writers
+cp "$sandbox/infra/.env" "$sandbox/original.env"
+echo 'DBT_ARTIFACTS_BUCKET=fixture-artifacts' >> "$sandbox/infra/.env"
+run_script infra/10-bootstrap.sh || fail "split-bucket migration failed"
+assert_bucket_grants fixture-docs "$sandbox/bucket.json" '[]'
+assert_bucket_grants fixture-artifacts "$sandbox/artifacts.json" "$ci_roles"
+
+echo "scenario: missing scoped binding on readback leaves legacy writers on both buckets"
+seed_legacy_bucket_writers
+if fail_read=scoped run_script infra/10-bootstrap.sh; then fail "bootstrap accepted failed scope verification"; fi
+for file in "$sandbox/bucket.json" "$sandbox/artifacts.json"; do
+  jq -e --arg ci "$ci_member" '
+    any(.bindings[]; .role == "roles/storage.objectAdmin" and .condition == null and (.members | index($ci)))
+  ' "$file" >/dev/null || fail "removed legacy writer before verifying scoped access"
+done
+cp "$sandbox/original.env" "$sandbox/infra/.env"
+
+echo "scenario: buckets with object ACLs require operator migration before bucket IAM changes"
+seed_legacy_bucket_writers
+fail_read=nonuniform assert_no_write '^gcloud storage buckets (set|add)-iam-policy|^gsutil iam' infra/10-bootstrap.sh
 
 echo "scenario: failed dataset reads block bootstrap and developer ACL writes"
 reset_policies

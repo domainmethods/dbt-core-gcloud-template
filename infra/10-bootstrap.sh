@@ -48,7 +48,7 @@ ensure_bucket(){
   # Otherwise, attempt to create and handle a possible 409/name-taken error with a friendly message.
   info "Creating bucket: $uri"
   local create_out rc
-  create_out="$(gcloud storage buckets create "$uri" --location="$REGION" --project "$PROJECT_ID" 2>&1)"; rc=$?
+  create_out="$(gcloud storage buckets create "$uri" --uniform-bucket-level-access --location="$REGION" --project "$PROJECT_ID" 2>&1)"; rc=$?
   if [[ $rc -ne 0 ]]; then
     if [[ "$create_out" == *"409"* || "$create_out" == *"already exists"* || "$create_out" == *"not available"* || "$create_out" == *"already owns this bucket"* ]]; then
       echo "[error] Bucket name '${name}' is already taken globally." >&2
@@ -76,7 +76,7 @@ ensure_bucket_named(){
     exit 1
   fi
   info "Creating bucket: $uri"
-  create_out="$(gcloud storage buckets create "$uri" --location="$REGION" --project "$PROJECT_ID" 2>&1)"; rc=$?
+  create_out="$(gcloud storage buckets create "$uri" --uniform-bucket-level-access --location="$REGION" --project "$PROJECT_ID" 2>&1)"; rc=$?
   if [[ $rc -ne 0 ]]; then
     if [[ "$create_out" == *"409"* || "$create_out" == *"already exists"* || "$create_out" == *"not available"* || "$create_out" == *"already owns this bucket"* ]]; then
       echo "[error] Bucket name '${name}' is already taken globally." >&2
@@ -116,26 +116,44 @@ read_bucket_policy() {
   fi
 }
 
-# Ensure a member has a role on a GCS bucket via get-modify-set flow (idempotent)
+write_bucket_policy_if_changed() {
+  local bucket="$1" before="$2" after="$3"
+  if ! jq -es '.[0] == .[1]' "$before" "$after" >/dev/null; then
+    info "Updating bucket IAM: gs://${bucket}"
+    gcloud storage buckets set-iam-policy "gs://${bucket}" "$after" --project "$PROJECT_ID" >/dev/null
+  fi
+}
+
 ensure_bucket_binding () {
-  local bucket="$1" role="$2" member="$3"
+  local bucket="$1" role="$2" member="$3" condition="${4:-null}"
   local tmp="${TMP_DIR}/bkt_iam_old.json" tmp2="${TMP_DIR}/bkt_iam_new.json"
   read_bucket_policy "$bucket" "$tmp"
-  jq --arg role "${role}" --arg member "${member}" '
-    def target: .role == $role and .condition == null;
+  jq --arg role "$role" --arg member "$member" --argjson condition "$condition" '
+    def target: .role == $role and .condition == $condition;
     if any(.bindings[]?; target and (.members | index($member))) then .
     elif any(.bindings[]?; target) then
       .bindings |= map(if target then .members += [$member] else . end)
     else
       .bindings += [{"role": $role, "members": [$member]}]
+      | if $condition == null then . else .version = 3 | .bindings[-1].condition = $condition end
     end
-  ' "${tmp}" > "${tmp2}"
-  if ! jq -es '.[0] == .[1]' "$tmp" "$tmp2" >/dev/null; then
-    info "Updating bucket IAM: gs://${bucket} ${role} += ${member}"
-    gcloud storage buckets set-iam-policy "gs://${bucket}" "${tmp2}" --project "${PROJECT_ID}" >/dev/null
-  else
-    info "Bucket IAM already set: gs://${bucket} ${role} has ${member}"
-  fi
+  ' "$tmp" > "$tmp2"
+  write_bucket_policy_if_changed "$bucket" "$tmp" "$tmp2"
+}
+
+remove_legacy_ci_bucket_writer() {
+  local bucket="$1" policy="$2" updated="${TMP_DIR}/bkt_iam_migrated.json"
+  jq --arg ci "serviceAccount:${CI_SA_EMAIL}" '
+    if .bindings == null then . else
+      .bindings |= map(
+        if .role == "roles/storage.objectAdmin" and .condition == null and (.members | index($ci))
+        then .members -= [$ci] | select(.members | length > 0)
+        else .
+        end
+      )
+    end
+  ' "$policy" > "$updated"
+  write_bucket_policy_if_changed "$bucket" "$policy" "$updated"
 }
 
 require_env PROJECT_ID PROJECT_NUMBER REGION BQ_LOCATION AR_REPO PROD_DATASET DBT_DOCS_BUCKET CI_SA_ID PROD_SA_ID SCHEDULER_SA_ID
@@ -143,6 +161,11 @@ require_env PROJECT_ID PROJECT_NUMBER REGION BQ_LOCATION AR_REPO PROD_DATASET DB
 CI_SA_EMAIL="${CI_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
 PROD_SA_EMAIL="${PROD_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
 SCHED_SA_EMAIL="${SCHEDULER_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+if [[ "$CI_SA_EMAIL" == "$PROD_SA_EMAIL" ]]; then
+  echo "[error] CI_SA_ID and PROD_SA_ID must name different service accounts" >&2
+  exit 1
+fi
 
 info "Enabling required APIs"
 ensure_api run.googleapis.com
@@ -378,32 +401,47 @@ else
   info "MANAGE_DATASET_IAM=false; skipping dataset IAM bindings"
 fi
 
-info "Ensuring bucket IAM for docs"
-ensure_bucket_binding "${DBT_DOCS_BUCKET}" "roles/storage.objectAdmin" "serviceAccount:${PROD_SA_EMAIL}"
-ensure_bucket_binding "${DBT_DOCS_BUCKET}" "roles/storage.objectAdmin" "serviceAccount:${CI_SA_EMAIL}"
-
-# If a separate artifacts bucket is defined and differs from DBT_DOCS_BUCKET, grant IAM there too
 if [[ "${ARTIFACTS_BUCKET_EFFECTIVE}" != "${DBT_DOCS_BUCKET}" ]]; then
   info "Ensuring artifacts bucket exists (${ARTIFACTS_BUCKET_EFFECTIVE})"
   ensure_bucket_named "${ARTIFACTS_BUCKET_EFFECTIVE}"
 fi
 
-# Ensure both PROD and CI SAs have required permissions on the effective artifacts bucket
-info "Ensuring bucket IAM (PROD) for artifacts bucket (${ARTIFACTS_BUCKET_EFFECTIVE})"
-ensure_bucket_binding "${ARTIFACTS_BUCKET_EFFECTIVE}" "roles/storage.objectAdmin" "serviceAccount:${PROD_SA_EMAIL}"
-info "Ensuring bucket IAM (CI) for artifacts bucket (${ARTIFACTS_BUCKET_EFFECTIVE})"
-ensure_bucket_binding "${ARTIFACTS_BUCKET_EFFECTIVE}" "roles/storage.objectAdmin" "serviceAccount:${CI_SA_EMAIL}"
-
-# Verify IAM took effect for CI SA
-if gcloud storage buckets get-iam-policy "gs://${ARTIFACTS_BUCKET_EFFECTIVE}" --format=json --project "${PROJECT_ID}" 2>/dev/null | jq -e --arg m "serviceAccount:${CI_SA_EMAIL}" '.bindings[]? | select(.role=="roles/storage.objectAdmin") | .members[]? | select(.==$m)' >/dev/null 2>&1; then
-  info "Verified CI SA has objectAdmin on gs://${ARTIFACTS_BUCKET_EFFECTIVE}"
-else
-  echo "[error] CI SA is missing roles/storage.objectAdmin on gs://${ARTIFACTS_BUCKET_EFFECTIVE}." >&2
-  echo "        Ensure your account has permission to modify bucket IAM and re-run." >&2
-  echo "        You can also grant it manually:" >&2
-  echo "        gcloud storage buckets add-iam-policy-binding gs://${ARTIFACTS_BUCKET_EFFECTIVE} \\" >&2
-  echo "          --member serviceAccount:${CI_SA_EMAIL} --role roles/storage.objectAdmin --project ${PROJECT_ID}" >&2
+if ! gcloud storage buckets describe "gs://${ARTIFACTS_BUCKET_EFFECTIVE}" --project "$PROJECT_ID" --format=json |
+     jq -e '.uniform_bucket_level_access == true' >/dev/null; then
+  echo "[error] Could not confirm uniform bucket-level access on gs://${ARTIFACTS_BUCKET_EFFECTIVE}." >&2
+  echo "        IAM Conditions require it. Review existing object ACLs before enabling it and rerunning bootstrap." >&2
   exit 1
+fi
+
+ensure_bucket_binding "$DBT_DOCS_BUCKET" roles/storage.objectAdmin "serviceAccount:${PROD_SA_EMAIL}"
+if [[ "$ARTIFACTS_BUCKET_EFFECTIVE" != "$DBT_DOCS_BUCKET" ]]; then
+  ensure_bucket_binding "$ARTIFACTS_BUCKET_EFFECTIVE" roles/storage.objectAdmin "serviceAccount:${PROD_SA_EMAIL}"
+fi
+
+# Object listing is a bucket operation. The writer condition applies to objects only.
+ci_object_prefix="projects/_/buckets/${ARTIFACTS_BUCKET_EFFECTIVE}/objects/ci/"
+ci_artifact_condition=$(jq -nc \
+  --arg expression "resource.type == 'storage.googleapis.com/Object' && resource.name.startsWith('$ci_object_prefix')" \
+  '{title:"dbt-ci-artifacts", expression:$expression}')
+ensure_bucket_binding "$ARTIFACTS_BUCKET_EFFECTIVE" roles/storage.objectViewer "serviceAccount:${CI_SA_EMAIL}"
+ensure_bucket_binding "$ARTIFACTS_BUCKET_EFFECTIVE" roles/storage.objectUser "serviceAccount:${CI_SA_EMAIL}" "$ci_artifact_condition"
+
+ci_policy="${TMP_DIR}/ci_bucket_policy.json"
+read_bucket_policy "$ARTIFACTS_BUCKET_EFFECTIVE" "$ci_policy"
+if ! jq -e --arg ci "serviceAccount:${CI_SA_EMAIL}" --argjson scope "$ci_artifact_condition" '
+  def granted($role; $condition):
+    any(.bindings[]?; .role == $role and .condition == $condition and (.members | index($ci)));
+  granted("roles/storage.objectViewer"; null) and granted("roles/storage.objectUser"; $scope)
+' "$ci_policy" >/dev/null; then
+  echo "[error] CI read/list and ci/ write bindings could not be verified on gs://${ARTIFACTS_BUCKET_EFFECTIVE}." >&2
+  exit 1
+fi
+info "Verified CI read/list and ci/ write bindings on gs://${ARTIFACTS_BUCKET_EFFECTIVE}"
+
+remove_legacy_ci_bucket_writer "$ARTIFACTS_BUCKET_EFFECTIVE" "$ci_policy"
+if [[ "$ARTIFACTS_BUCKET_EFFECTIVE" != "$DBT_DOCS_BUCKET" ]]; then
+  read_bucket_policy "$DBT_DOCS_BUCKET" "$ci_policy"
+  remove_legacy_ci_bucket_writer "$DBT_DOCS_BUCKET" "$ci_policy"
 fi
 
 # Allow docs viewer SA to read docs (if defined)
