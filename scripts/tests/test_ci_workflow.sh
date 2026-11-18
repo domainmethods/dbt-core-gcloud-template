@@ -30,6 +30,8 @@ for step in "Create ephemeral dataset" "Generate docs (optional preview)" \
   assert_contains "$(step_if "$step")" "env.HAS_MODEL_CHANGES != 'false'" "'$step' gated on HAS_MODEL_CHANGES"
 done
 assert_contains "$(step_if "Cleanup dataset")" "always()" "cleanup still runs after a failed build"
+assert_contains "$(wf "next(s['run'] for s in w['jobs']['bigquery-ci']['steps'] if s.get('name') == 'Create ephemeral dataset')")" \
+  "dbt parse --target ci"$'\n'"bash scripts/create_bq_dataset.sh" "dataset provisioning uses the freshly parsed CI manifest"
 
 echo "scenario 2: yamllint is its own job and gates bigquery-ci (#33)"
 assert_eq "$(wf "'yamllint' in w['jobs']")" "True" "yamllint job exists"

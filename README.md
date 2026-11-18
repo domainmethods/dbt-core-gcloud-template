@@ -571,10 +571,10 @@ In addition to row/data diffs, the CI pipeline can generate a schema comparison 
 **Flow**
 
 1. OIDC auth in GitHub Actions (no JSON keys). Ensure `permissions: id-token: write`.
-2. Create ephemeral BigQuery dataset `ci_pr_<PR>_<runid>` (cleaned up at end). The bootstrap grants the CI service account `roles/bigquery.user` so it can create datasets. The workflow then hardens ACLs so only the CI service account is `WRITER` on the dataset (removes `projectWriters`); everyone else is read‑only.
+2. Create `ci_pr_<PR>_<runid>_<attempt>` and the custom-schema datasets listed in the CI manifest. The bootstrap grants the CI service account `roles/bigquery.user` so it can create datasets. The workflow labels each dataset with its repository and run attempt and removes the `projectWriters` ACL.
 3. **Slim CI**: `dbt build --select state:modified+ --defer --state <prod_artifacts>` so only changed nodes + dependents run, resolving upstream refs to prod objects. ([Medium][2], [Klaviyo Engineering][3])
 4. Generate docs and upload to `gs://$DBT_ARTIFACTS_BUCKET/ci/...`.
-5. Always drop the ephemeral dataset.
+5. Drop the datasets with matching ownership labels at the end of the attempt. The scheduled sweep removes older owned datasets left by interrupted runs. Unlabeled datasets created before this change are excluded from the sweep.
 
 > These Slim CI patterns (state selector + deferral) are documented in community engineering posts and case studies. ([Klaviyo Engineering][3], [Medium][2])
 
