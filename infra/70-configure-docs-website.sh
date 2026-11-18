@@ -2,15 +2,18 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
-PUBLIC_OVERRIDE="${PUBLIC-}"
+# DOCS_PUBLIC is the one-off shell override. PUBLIC comes only from infra/.env:
+# setup-env.sh exports it, so a value already in the shell may be stale.
+DOCS_PUBLIC_OVERRIDE="${DOCS_PUBLIC-}"
+unset PUBLIC
 source ./.env
 
 DOCS_BUCKET="${DBT_DOCS_BUCKET:?Set DBT_DOCS_BUCKET in infra/.env}"
 ARTIFACTS_BUCKET="${DBT_ARTIFACTS_BUCKET:-${DOCS_BUCKET}}"
-PUBLIC="${PUBLIC_OVERRIDE:-${PUBLIC:-false}}"
+PUBLIC="${DOCS_PUBLIC_OVERRIDE:-${PUBLIC:-false}}"
 
 if [[ "$PUBLIC" != true && "$PUBLIC" != false ]]; then
-  echo "[error] PUBLIC must be true or false." >&2
+  echo "[error] DOCS_PUBLIC / PUBLIC must be true or false." >&2
   exit 1
 fi
 
@@ -24,7 +27,8 @@ if ! gcloud storage buckets update "gs://${DOCS_BUCKET}" \
   --web-main-page-suffix=index.html \
   --project "${PROJECT_ID}"; then
   echo "[error] Failed to configure website settings on gs://${DOCS_BUCKET}" >&2
-  echo "        Ensure you have storage.buckets.update permission on this bucket." >&2
+  echo "        Ensure you have storage.buckets.update permission on this bucket" >&2
+  echo "        (and storage.buckets.getIamPolicy/setIamPolicy for the IAM changes below)." >&2
   exit 1
 fi
 
@@ -37,17 +41,25 @@ if [[ "${PUBLIC}" == "true" ]]; then
   echo "Public URL: https://storage.googleapis.com/${DOCS_BUCKET}/index.html"
 else
   get_bucket_policy() {
-    gcloud storage buckets get-iam-policy "gs://${DOCS_BUCKET}" --project "${PROJECT_ID}" --format=json
+    if ! gcloud storage buckets get-iam-policy "gs://${DOCS_BUCKET}" --project "${PROJECT_ID}" --format=json; then
+      echo "[error] Failed to read bucket IAM policy on gs://${DOCS_BUCKET} (needs storage.buckets.getIamPolicy)." >&2
+      return 1
+    fi
   }
 
   policy=$(get_bucket_policy)
+  # -e fails on unparsable input, but it also fails when the result is false;
+  # tostring turns false into the string "false" so only a bad policy aborts.
   managed_grant=$(jq -er 'any(.bindings[]?;
     .role == "roles/storage.objectViewer" and .condition == null and any(.members[]?; . == "allUsers")
   ) | tostring' <<< "$policy")
   if [[ "$managed_grant" == true ]]; then
-    gcloud storage buckets remove-iam-policy-binding "gs://${DOCS_BUCKET}" \
+    if ! gcloud storage buckets remove-iam-policy-binding "gs://${DOCS_BUCKET}" \
       --member=allUsers --role=roles/storage.objectViewer --condition=None \
-      --project "${PROJECT_ID}" --quiet
+      --project "${PROJECT_ID}" --quiet; then
+      echo "[error] Failed to remove the allUsers reader grant on gs://${DOCS_BUCKET} (needs storage.buckets.setIamPolicy)." >&2
+      exit 1
+    fi
     policy=$(get_bucket_policy)
   fi
 

@@ -856,13 +856,13 @@ The job can generate a single-file site (`target/index.html`) via `dbt docs gene
   * Set `DBT_ARTIFACTS_BUCKET` to a different bucket. An empty value defaults to the docs bucket.
   * Update the bootstrap and deployment configuration to use those buckets before enabling public access.
   * Configure and print URL:
-    * `(cd infra && PUBLIC=true ./70-configure-docs-website.sh)`
+    * `(cd infra && DOCS_PUBLIC=true ./70-configure-docs-website.sh)`
     * Then open: `https://storage.googleapis.com/${DBT_DOCS_BUCKET}/index.html`
-  * A shell value of `PUBLIC=true` or `PUBLIC=false` takes precedence over `infra/.env`.
+  * `DOCS_PUBLIC=true` or `DOCS_PUBLIC=false` in the shell takes precedence over `PUBLIC` in `infra/.env`. A `PUBLIC` already in the shell (for example, exported by `setup-env.sh`) is ignored; the script re-reads it from `infra/.env`.
   * Caution: Public means world-readable. Use only if acceptable.
 
 * Option B — Private access (no public read)
-  * Run `(cd infra && PUBLIC=false ./70-configure-docs-website.sh)` to revoke the website helper's public reader grant. It checks bucket IAM for remaining public grants. Inherited IAM and object ACLs are separate access controls.
+  * Run `(cd infra && DOCS_PUBLIC=false ./70-configure-docs-website.sh)` to revoke the website helper's public reader grant. It checks bucket IAM for remaining public grants. Inherited IAM and object ACLs are separate access controls.
   * View via Cloud Console (Storage > Buckets > your bucket > `index.html` > Open in browser) when authenticated.
   * For a private HTTP endpoint, consider a Cloud Run proxy or Load Balancer + CDN with IAM integration. Ask if you want me to add a tiny Cloud Run service that serves the file from GCS using the service account.
 
