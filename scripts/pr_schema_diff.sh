@@ -11,6 +11,7 @@ set -euo pipefail
 #   DBT_BQ_DATASET       (required)
 #   DBT_GCP_PROJECT_PROD (optional, defaults to CI project)
 #   DBT_BQ_DATASET_PROD  (optional, default: analytics)
+#   DBT_BQ_LOCATION     (optional, default: US)
 #   SCHEMA_DIFF_PROD_DATASETS (optional, comma-separated; overrides DBT_BQ_DATASET_PROD)
 #   ARTIFACT_DIR         (optional, default: schema_diff_reports)
 #
@@ -119,14 +120,37 @@ node_to_fqn() {
   }'
 }
 
-# Query failures are logged and cached as empty for the per-model error report.
-# bq follows pages up to --max_rows. Request one extra row to detect overflow.
+# Failure markers cached in place of a failed query's output. The CLI text goes
+# to the log (stderr), never into the JSON cache, so stderr noise cannot corrupt
+# a successful result. The marker keeps the one fact classify_raw needs: whether
+# the failure was an access denial (AUTH_ERROR) or something else, e.g.
+# "Not found: Dataset" (NON_JSON). A failure with no text is treated as auth,
+# as it was when the raw output itself was cached.
+readonly BQ_FAILED_PREFIX="__BQ_QUERY_FAILED__"
+readonly BQ_FAILED_AUTH="${BQ_FAILED_PREFIX}:AUTH"
+readonly BQ_FAILED_OTHER="${BQ_FAILED_PREFIX}:OTHER"
+
+# Query failures are logged and cached as a failure marker for the per-model
+# error report. bq follows pages up to --max_rows. Request one extra row to
+# detect overflow, which returns non-zero so the report fails.
 bq_json() {
   local project=$1 sql=$2
-  local out
-  if ! out=$(bq --quiet --project_id="$project" query --nouse_legacy_sql --format=json \
-    --start_row=0 --max_rows="$((METADATA_ROW_LIMIT + 1))" --maximum_bytes_billed=1000000000 "$sql"); then
+  local out err_file err rc=0
+  err_file=$(mktemp)
+  out=$(bq --quiet --project_id="$project" --location="${DBT_BQ_LOCATION:-US}" \
+    query --nouse_legacy_sql --format=json \
+    --start_row=0 --max_rows="$((METADATA_ROW_LIMIT + 1))" --maximum_bytes_billed=1000000000 \
+    "$sql" 2>"$err_file") || rc=$?
+  err=$(cat "$err_file")
+  rm -f "$err_file"
+  [[ -z "$err" ]] || printf '%s\n' "$err" >&2
+  if (( rc != 0 )); then
     [[ -z "$out" ]] || printf '%s\n' "$out" >&2
+    if [[ -z "$out$err" || "$out$err" == *"Access Denied"* ]]; then
+      printf '%s' "$BQ_FAILED_AUTH"
+    else
+      printf '%s' "$BQ_FAILED_OTHER"
+    fi
     return 0
   fi
   if jq -e --argjson limit "$METADATA_ROW_LIMIT" 'type == "array" and length > $limit' \
@@ -158,8 +182,8 @@ is_json_array() {
 # Declared initialized. A bare `declare -A` leaves the array unset, and reading
 # an unset array under `set -u` is the class of defect this file was fixed for.
 # Loaded-ness is tracked separately from content so a genuinely empty result is
-# distinguishable from "not fetched yet" — a failed fetch caches as an empty
-# string and must NOT be retried per model, or the query volume comes back.
+# distinguishable from "not fetched yet" — a failed fetch caches as a failure
+# marker and must NOT be retried per model, or the query volume comes back.
 declare -A DS_LOADED=()
 declare -A DS_COLS=()
 declare -A DS_TBL=()
@@ -209,13 +233,15 @@ ensure_dataset_cached() {
 # Filters a cached dataset-wide blob down to one table.
 #
 # ERROR PASSTHROUGH — the load-bearing part. Status classification reads the
-# raw bq output and tests it as a string ("Access Denied", empty, banner text).
+# raw cached value and tests it as a string (failure marker, "Access Denied" on
+# stdout, empty, banner text).
 # Before batching each model triggered its own query and so saw the failure
 # directly. Now the failure happens once, at load time, for the whole dataset.
 # A blob that is not a JSON array is therefore handed back VERBATIM to every
 # model in that dataset, so each one classifies exactly as it would have. Try
 # to jq-filter it instead and jq fails, the helper emits an empty array, and a
 # whole dataset's permissions failure turns into a clean OK diff on every row.
+# The failure markers from bq_json are not JSON, so they pass through too.
 ds_filter() {
   local raw=${1:-} ident=$2 projection=$3
   if ! is_json_array "$raw"; then
@@ -256,11 +282,15 @@ bq_tables_raw() {
   printf '%s' "${DS_TBL[$project.$dataset]:-}"
 }
 
-# Classifies ONE raw bq result: OK | AUTH_ERROR | NON_JSON.
+# Classifies ONE raw cached result: OK | AUTH_ERROR | NON_JSON.
 # Must be called on the raw value, before as_json_array touches it.
+#   AUTH_ERROR: the access-denied failure marker, an "Access Denied" message
+#               that bq printed with exit 0, or no value at all.
+#   NON_JSON:   any other failure marker (e.g. "Not found: Dataset") or
+#               output that is not a JSON array (banner text).
 classify_raw() {
   local raw=${1:-}
-  if [[ -z "$raw" || "$raw" == *"Access Denied"* ]]; then
+  if [[ -z "$raw" || "$raw" == "$BQ_FAILED_AUTH" || "$raw" == *"Access Denied"* ]]; then
     echo "AUTH_ERROR"
   elif ! is_json_array "$raw"; then
     echo "NON_JSON"
@@ -271,7 +301,7 @@ classify_raw() {
 
 # Echoes the argument if it is a JSON array, otherwise an empty array.
 # Apply ONLY where a value is handed to jq. Status classification reads the
-# raw bq output, because "Access Denied" is a signal that normalizing destroys.
+# raw value, because the failure markers are a signal that normalizing destroys.
 as_json_array() {
   if is_json_array "${1:-}"; then
     printf '%s' "$1"
@@ -444,10 +474,10 @@ for m in "${MODELS[@]}"; do
   dev_opts_json=$(bq_table_options "$DEV_P" "$DEV_D" "$DEV_T" 2>/dev/null || true)
   prod_opts_json=$(bq_table_options "$PROD_P" "$PROD_D" "$PROD_T" 2>/dev/null || true)
 
-  # --- Classify from RAW output. Do not normalize before this block: ---
-  # as_json_array would rewrite "Access Denied" to "[]", which is non-empty and
-  # no longer matches the substring test, silently downgrading a permissions
-  # failure to a clean OK diff.
+  # --- Classify from RAW cached values. Do not normalize before this block: ---
+  # a failed query is cached as a marker saying whether it was an access denial
+  # (AUTH_ERROR) or another error (NON_JSON). as_json_array would rewrite the
+  # marker to "[]", silently downgrading the failure to a clean OK diff.
   #
   # Classify every metadata fetch. A successful zero-row result is a JSON array.
   status="OK"
@@ -553,7 +583,7 @@ orphans_md="$ARTIFACT_DIR/orphans.md"
     # instead of issuing a duplicate. For a prod dataset the model loop already
     # visited this costs nothing.
     list_json=$(bq_tables_raw "$PROD_PROJECT" "$ds") || exit 1
-    if [[ -z "$list_json" ]]; then
+    if [[ -z "$list_json" || "$list_json" == "$BQ_FAILED_PREFIX"* ]]; then
       echo "[warn] Could not list tables in $PROD_PROJECT.$ds (no access?)" >> "$orphans_md"
       continue
     fi

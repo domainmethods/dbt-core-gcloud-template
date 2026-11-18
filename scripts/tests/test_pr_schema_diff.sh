@@ -152,6 +152,13 @@ BOTH_TABLES='[{"table_name":"fct_example","table_type":"BASE TABLE"},{"table_nam
 
 is_dev() { [[ "$args" == *ci_pr_1* ]]; }
 
+# prod_not_found: the prod dataset does not exist. Every prod query fails with
+# a non-auth error on stderr, which must not be reported as AUTH_ERROR.
+if [[ "$STUB_MODE" == "prod_not_found" ]] && ! is_dev; then
+  echo 'BigQuery error in query operation: Not found: Dataset prodproj:analytics' >&2
+  exit 1
+fi
+
 # Model bq query's 100-row default and --max_rows override for large fixtures.
 max_rows=100
 for arg in "$@"; do
@@ -274,8 +281,10 @@ cleanup() { [[ -n "${SANDBOX:-}" && -d "$SANDBOX" ]] && rm -rf "$SANDBOX"; }
 scenario_1() {
   echo "  scenario 1: zero orphans (every prod table covered by the manifest)"
   make_sandbox ok_no_orphans
-  run_diff; local rc=$?
+  DBT_BQ_LOCATION=EU run_diff; local rc=$?
   assert_eq 0 "$rc" "exits 0 when no orphans are found"
+  assert_contains "$(cat "$BQ_CALL_LOG")" "--project_id=ciproj --location=EU query" "CI schema queries run in EU"
+  assert_contains "$(cat "$BQ_CALL_LOG")" "--project_id=prodproj --location=EU query" "prod schema queries run in EU"
   assert_contains "$(cat "$SANDBOX/out/orphans.md")" "Found 0 orphan(s)." "reports zero orphans"
   cleanup
 }
@@ -788,6 +797,22 @@ scenario_23() {
   cleanup
 }
 
+scenario_24() {
+  echo "  scenario 24: a missing prod dataset is a query error, not an auth error"
+  make_sandbox prod_not_found
+  run_diff; local rc=$?
+  assert_eq 0 "$rc" "keeps a failure row when the prod dataset is missing"
+  assert_contains "$RUN_STDERR" "Not found: Dataset prodproj:analytics" "preserves the CLI diagnostic"
+  assert_contains "$(summary_line_for fct_example)" "|status=NON_JSON|" \
+    "not-found error is classified NON_JSON"
+  assert_not_contains "$(summary_line_for fct_example)" "AUTH_ERROR" \
+    "not-found error is not reported as a permissions failure"
+  assert_contains "$(cat "$SANDBOX/out/orphans.md")" "Could not list tables" \
+    "orphan report says the listing failed"
+  assert_eq 6 "$(bq_call_count)" "failed queries are cached, not retried per model"
+  cleanup
+}
+
 echo "test_pr_schema_diff.sh"
 scenario_1
 scenario_2
@@ -812,6 +837,7 @@ scenario_20
 scenario_21
 scenario_22
 scenario_23
+scenario_24
 
 echo ""
 echo "passed: $PASS_COUNT  failed: $FAIL_COUNT"

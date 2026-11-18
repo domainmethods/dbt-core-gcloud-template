@@ -291,6 +291,27 @@ scenario_14() {
   cleanup
 }
 
+scenario_15() {
+  echo "  scenario 15: SQL and YAML change on independent models -> keep filename scope and add state fallback"
+  make_repo
+  printf 'select 1 as id\n' > "$REPO/models/sql_changed.sql"
+  printf 'select 2 as id\n' > "$REPO/models/yaml_changed.sql"
+  printf 'version: 2\nmodels:\n  - name: yaml_changed\n    config:\n      materialized: view\n' > "$REPO/models/properties.yml"
+  git -C "$REPO" add models
+  git -C "$REPO" commit -q -m "two independent models"
+  BASE=$(git -C "$REPO" rev-parse HEAD)
+
+  printf 'select 3 as id\n' > "$REPO/models/sql_changed.sql"
+  sed 's/materialized: view/materialized: table/' "$REPO/models/properties.yml" > "$REPO/properties.yml"
+  mv "$REPO/properties.yml" "$REPO/models/properties.yml"
+  git -C "$REPO" commit -qam "change one model's SQL and another's materialization"
+  run_script "$BASE"
+  assert_contains "$RUN_ENV" "BUILD_SELECT=sql_changed+" "the SQL model supplies the filename selector"
+  assert_contains "$RUN_ENV" "DIFF_SELECT=sql_changed+" "the diff keeps the filename scope"
+  assert_contains "$RUN_ENV" "NEEDS_FALLBACK=true" "the independent YAML change also needs state selection"
+  cleanup
+}
+
 echo "test_get_changed_models.sh"
 scenario_1
 scenario_2
@@ -306,6 +327,7 @@ scenario_11
 scenario_12
 scenario_13
 scenario_14
+scenario_15
 
 echo ""
 echo "passed: $PASS_COUNT  failed: $FAIL_COUNT"
