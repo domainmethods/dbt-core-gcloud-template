@@ -4,8 +4,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 source ./.env
 
-POOL_ID="github-pool"
-PROVIDER_ID="github-provider"
+POOL_ID="${POOL_ID:-github-pool}"
+PROVIDER_ID="${PROVIDER_ID:-github-provider}"
 ISSUER_URI="https://token.actions.githubusercontent.com"
 
 require_env(){
