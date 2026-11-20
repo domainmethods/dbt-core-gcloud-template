@@ -79,6 +79,8 @@ case "$*" in
     [[ "$etag" != null && "$etag" == "$(jq -r .etag "$5")" ]]
     cp "$5" "$policy"
     ;;
+  'iam roles describe dbtReleaseJobIam '*|'iam roles create dbtReleaseJobIam '*)
+    echo '{"includedPermissions":["run.jobs.setIamPolicy"],"stage":"GA"}' ;;
   *'get-iam-policy'*) echo '{"bindings":[]}' ;;
 esac
 STUB

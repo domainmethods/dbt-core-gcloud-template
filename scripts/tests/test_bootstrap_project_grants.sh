@@ -38,6 +38,8 @@ case "$*" in
   'storage buckets describe '*) echo '{"uniform_bucket_level_access":true}' ;;
   'storage buckets get-iam-policy '*) cat "$FIXTURE/bucket.json" ;;
   'storage buckets set-iam-policy '*) cp "$5" "$FIXTURE/bucket.json" ;;
+  'iam roles describe dbtReleaseJobIam '*|'iam roles create dbtReleaseJobIam '*)
+    echo '{"includedPermissions":["run.jobs.setIamPolicy"],"stage":"GA"}' ;;
   *'get-iam-policy'*) echo '{"bindings":[]}' ;;
 esac
 STUB
