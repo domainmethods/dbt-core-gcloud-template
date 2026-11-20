@@ -73,5 +73,11 @@ assert_contains "$upload" 'artifact_uri="gs://${DBT_ARTIFACTS_BUCKET}/ci/pr-' "u
 assert_contains "$upload" 'parallel_composite_upload_threshold=0 -m rsync -r ./target "${artifact_uri}/"' "rsync targets ci/ without composite uploads"
 assert_contains "$upload" 'parallel_composite_upload_threshold=0 cp target/manifest.json "${artifact_uri}/manifest.json"' "manifest copy targets ci/ without composite uploads"
 
+echo "scenario 5: bigquery-ci pins Python 3.11 before installing requirements"
+setup_py_idx=$(wf "next((i for i, s in enumerate(w['jobs']['bigquery-ci']['steps']) if s.get('uses') == 'actions/setup-python@v6' and str((s.get('with') or {}).get('python-version', '')) == '3.11'), -1)")
+install_idx=$(wf "next((i for i, s in enumerate(w['jobs']['bigquery-ci']['steps']) if s.get('name') == 'Python & dbt install'), -1)")
+assert_eq "$( (( setup_py_idx >= 0 && setup_py_idx < install_idx )) && echo True || echo False )" "True" \
+  "bigquery-ci runs actions/setup-python@v6 (3.11) before Python & dbt install"
+
 echo "results: passed: $PASS_COUNT, failed: $FAIL_COUNT"
 [[ $FAIL_COUNT -eq 0 ]]
