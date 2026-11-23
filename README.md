@@ -457,7 +457,7 @@ Optional helpers (as needed):
 * [infra/80-deploy-docs-viewer.sh](#docs-viewer-cloud-run-iam-only) — Deploy private Cloud Run docs viewer service (reads index.html from GCS).
 * [infra/81-grant-docs-viewer-access.sh](#docs-viewer-cloud-run-iam-only) — Grant run.invoker to users/groups for the docs viewer.
 * [infra/85-ensure-notification-channels.sh](#monitoring) — Create/reuse Monitoring email channels; writes NOTIFICATION_CHANNELS.
-* [infra/90-monitoring.sh](#monitoring) — Ensure alerting policies for Run Job, Scheduler, and BigQuery errors.
+* [infra/90-monitoring.sh](#monitoring) — Ensure alerting policies for Run Job, Scheduler, BigQuery errors, and optional hourly BigQuery bytes-billed spikes.
 * [infra/15-artifacts-lifecycle.sh](#docs--artifacts) — Expire CI artifacts under `ci/` and per-execution diagnostics under `prod/runs/` after 30 days.
 * [infra/check-operator-iam.sh](#operator-iam-to-run-infra-scripts) — Check current operator’s project roles; helpful before running bootstrap.
 
@@ -970,8 +970,8 @@ Rule of thumb: write a test at the grain it checks. A test that scans more than 
 
 Set up basic monitoring for failures across the stack using log‑based metrics and alerting policies.
 
-* Metrics: `cloud_run_job_errors`, `cloud_run_job_failures` (text match), `cloud_scheduler_job_errors`, `bigquery_job_errors`.
-* Policies: alert when count > 0 over 5 minutes; uses `gcloud beta/alpha monitoring policies`.
+* Metrics: `cloud_run_job_errors`, `cloud_run_job_failures` (text match), `cloud_scheduler_job_errors`, `bigquery_job_errors`, plus built-in `bigquery.googleapis.com/query/scanned_bytes_billed` when `BQ_BYTES_SCANNED_ALERT_GB` is set.
+* Policies: alert when error count > 0 over 5 minutes, and (when `BQ_BYTES_SCANNED_ALERT_GB` > 0) when project BigQuery bytes billed exceed the configured GB/hr threshold; uses `gcloud beta/alpha monitoring policies`.
 * Channels: optional but recommended via `infra/85-ensure-notification-channels.sh` (sets `NOTIFICATION_CHANNELS`).
 
 Usage
@@ -981,8 +981,14 @@ Usage
   * The script updates `infra/.env` and can export a helper file `.notification_channels.env`.
 * Create metrics + policies:
   * `(cd infra && ./90-monitoring.sh)`
-* Override names/regions (optional):
-  * `JOB_NAME=dbt-prod-run SCHED_JOB_NAME=dbt-prod-nightly REGION=us-central1 SCHED_REGION=us-central1 (cd infra && ./90-monitoring.sh)`
+* Override names/regions or cost threshold (optional):
+  * `JOB_NAME=dbt-prod-run SCHED_JOB_NAME=dbt-prod-nightly BQ_BYTES_SCANNED_ALERT_GB=25 (cd infra && ./90-monitoring.sh)`
+
+Cost guardrails (recommended per project)
+
+* **Per-query cap**: set `DBT_MAX_BYTES_BILLED` (in `infra/.env` / Cloud Run Job env vars) to a ceiling appropriate for your warehouse size.
+* **Daily circuit breaker**: set custom BigQuery daily query quotas (`QueryUsagePerDay` and `QueryUsagePerUserPerDay` under **IAM & Admin → Quotas**) so a runaway loop cannot consume the default 200 TiB/day limit.
+* **Project-wide budget**: configure a GCP **Billing Budget** in Cloud Console (**Billing → Budgets & alerts**) to cover non-BigQuery spend (Cloud Run, GCS, Artifact Registry) as well; billing accounts live outside project IAM and are not scripted by `infra/`.
 
 Notes
 

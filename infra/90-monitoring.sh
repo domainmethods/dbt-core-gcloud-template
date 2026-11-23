@@ -10,6 +10,7 @@ SCHED_REGION=${SCHED_REGION:-$REGION}
 JOB_NAME=${JOB_NAME:-dbt-prod-run}
 SCHED_JOB_NAME=${SCHED_JOB_NAME:-dbt-prod-nightly}
 CHANNELS=${NOTIFICATION_CHANNELS:-}
+BQ_BYTES_SCANNED_ALERT_GB=${BQ_BYTES_SCANNED_ALERT_GB:-}
 
 # Validate notification channels if provided
 if [[ -n "$CHANNELS" ]]; then
@@ -88,6 +89,34 @@ metric_policy_json() {
 JSON
 }
 
+bq_bytes_billed_policy_json() {
+  local display="$1" gb_threshold="$2" bytes_threshold="$3"
+  cat <<JSON
+{
+  "displayName": "$display",
+  "documentation": {
+    "content": "BigQuery scanned bytes billed in project ${PROJECT_ID} exceeded ${gb_threshold} GB in a 1-hour window. Inspect INFORMATION_SCHEMA.JOBS_BY_PROJECT to identify the principal and query.",
+    "mimeType": "text/markdown"
+  },
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "BigQuery scanned bytes billed > ${gb_threshold} GB / 1h",
+      "conditionThreshold": {
+        "filter": "metric.type=\"bigquery.googleapis.com/query/scanned_bytes_billed\" resource.type=\"global\"",
+        "aggregations": [
+          {"alignmentPeriod": "3600s", "perSeriesAligner": "ALIGN_SUM", "crossSeriesReducer": "REDUCE_SUM"}
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": $bytes_threshold,
+        "duration": "0s"
+      }
+    }
+  ]
+}
+JSON
+}
+
 ensure_policy() {
   local name="$1" file="$2"
   if $POL_CMD list --format="value(displayName)" --project "$PROJECT_ID" | grep -Fx "$name" >/dev/null 2>&1; then
@@ -143,6 +172,21 @@ ensure_policy "BigQuery Job Errors (Production)" "$TMP"
 # Also alert on text-matched job failures
 metric_policy_json "Cloud Run Job Failures (${JOB_NAME})" "cloud_run_job_failures" "cloud_run_job" "300s" "ALIGN_DELTA" "COMPARISON_GT" 0 "300s" > "$TMP"
 ensure_policy "Cloud Run Job Failures (${JOB_NAME})" "$TMP"
+
+# Optional: BigQuery bytes-billed alert (project-wide scanned bytes billed per 1h window)
+if [[ -n "$BQ_BYTES_SCANNED_ALERT_GB" && "$BQ_BYTES_SCANNED_ALERT_GB" != "0" ]]; then
+  if [[ ! "$BQ_BYTES_SCANNED_ALERT_GB" =~ ^[1-9][0-9]*$ ]]; then
+    echo "[error] BQ_BYTES_SCANNED_ALERT_GB must be a positive integer (or 0/empty to skip): $BQ_BYTES_SCANNED_ALERT_GB" >&2
+    rm -f "$TMP"
+    exit 1
+  fi
+  BQ_BYTES_THRESHOLD=$(( BQ_BYTES_SCANNED_ALERT_GB * 1000000000 ))
+  BQ_BYTES_POLICY_NAME="BigQuery Bytes Billed (>${BQ_BYTES_SCANNED_ALERT_GB} GB/hr)"
+  bq_bytes_billed_policy_json "$BQ_BYTES_POLICY_NAME" "$BQ_BYTES_SCANNED_ALERT_GB" "$BQ_BYTES_THRESHOLD" > "$TMP"
+  ensure_policy "$BQ_BYTES_POLICY_NAME" "$TMP"
+else
+  echo "[info] Skipping BigQuery bytes-billed alert (BQ_BYTES_SCANNED_ALERT_GB unset or 0)."
+fi
 
 rm -f "$TMP"
 echo "Monitoring alerts ensured."

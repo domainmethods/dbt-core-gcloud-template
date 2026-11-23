@@ -57,6 +57,7 @@ jobs:
           bash scripts/tests/test_set_github_secrets.sh
           bash scripts/tests/test_policy_updates.sh
           bash scripts/tests/test_wif_github.sh
+          bash scripts/tests/test_monitoring.sh
       # Timezone conventions (#68): no zone conversion before marts, no DATETIME(TIMESTAMP(x))
       # double shift without a `-- tz-ok: <reason>`. Reads models/ only; no dbt, no credentials.
       - name: Check timezone conventions
