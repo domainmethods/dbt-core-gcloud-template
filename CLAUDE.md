@@ -76,7 +76,7 @@ The hooks go through `scripts/sqlfluff_hook.sh`, which runs `dbt deps` first whe
 PR triggers: SQLFluff and yamllint jobs → `bigquery-ci` job that:
 1. Creates `ci_pr_<number>_<run_id>_<attempt>` and custom-schema datasets from the CI manifest, with ownership labels
 2. Downloads prod manifest from GCS for Slim CI (`state:modified+` with `--defer`)
-3. Runs `dbt build` against only modified models (full build when `requirements.txt` or `profiles/` changes, since `state:modified` can't see a dbt/adapter bump)
+3. Runs `dbt build` against only modified models (full build when `requirements.txt`, `profiles/` or the `vars:` block of `dbt_project.yml` changes, since `state:modified` can't see a dbt/adapter bump or a changed var)
 4. Generates data diffs (`scripts/pr_data_diff.sh`) and schema diffs (`scripts/pr_schema_diff.sh`)
 5. Posts diff summaries as PR comments
 6. Cleans up datasets owned by that run attempt
