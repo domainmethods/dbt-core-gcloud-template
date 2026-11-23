@@ -87,8 +87,9 @@ if [[ "${HAS_MODEL_CHANGES:-true}" == "false" ]]; then
 fi
 
 if [[ "${FULL_BUILD:-false}" == "true" ]]; then
-  # dbt-core/adapter or profile change: the manifest is unchanged, so state:modified+
-  # would select nothing. Build everything (no defer) to actually exercise the upgrade.
+  # dbt-core/adapter, profile or project-vars change: state:modified+ can't see it (the
+  # manifest is unchanged, or nodes render with new vars but unchanged SQL), so it would
+  # defer stale models to prod. Build everything (no defer).
   echo "Strategy: full build (requirements.txt, profiles/ or dbt_project.yml vars changed)"
   dbt build --target ci --exclude-resource-type test
   CI_SELECT=""; CI_DEFER=""
