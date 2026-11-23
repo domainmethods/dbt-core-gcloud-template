@@ -11,8 +11,8 @@ set -euo pipefail
 #   BUILD_SELECT=<same value as DIFF_SELECT>
 #   NEEDS_FALLBACK=true|false  (a change couldn't be scoped by filename; caller
 #                               should fall back to state:modified+)
-#   FULL_BUILD=true|false      (dbt/adapter or profile change: state:modified can't
-#                               see it, so the caller should build everything)
+#   FULL_BUILD=true|false      (dbt/adapter, profile or project-vars change: state:modified
+#                               can't see it, so the caller should build everything)
 #
 # Requires: git history (fetch-depth: 0 in checkout)
 
@@ -25,6 +25,12 @@ CHANGED_FILES=$(git diff --name-only "${BASE_REF}...HEAD" 2>/dev/null || git dif
 
 echo "Changed files:"
 echo "$CHANGED_FILES" | sed 's/^/  /'
+
+# Prints the top-level `vars:` block of dbt_project.yml at a git revision (empty if absent).
+project_vars_at() {
+  git show "$1:dbt_project.yml" 2>/dev/null \
+    | awk '/^vars:/ {in_vars = 1; print; next} in_vars && /^[^[:space:]#]/ {in_vars = 0} in_vars {print}'
+}
 
 # Categorize changed files; collect buildable node names (models, seeds, snapshots).
 HAS_MODEL_CHANGES=false
@@ -54,7 +60,16 @@ while IFS= read -r file; do
     # which state:modified+ picks up through the nodes that use them.
     macros/*.sql|tests/*|analyses/*|dbt_project.yml|packages.yml|package-lock.yml|dependencies.yml)
       HAS_MODEL_CHANGES=true
-      NEEDS_FALLBACK=true ;;
+      NEEDS_FALLBACK=true
+      # state:modified compares each node's SQL and config, not the vars it renders with, so a
+      # changed var (e.g. a package's ga4.conversion_events) leaves the models that read it
+      # deferred to prod, where they still have the old columns. Build everything instead.
+      if [[ "$file" == "dbt_project.yml" ]] \
+        && [[ "$(project_vars_at "$(git merge-base "$BASE_REF" HEAD 2>/dev/null || echo "$BASE_REF")")" \
+          != "$(project_vars_at HEAD)" ]]; then
+        echo "dbt_project.yml vars changed: state:modified can't see var changes, forcing a full build"
+        FULL_BUILD=true
+      fi ;;
     # A dbt-core/adapter bump or profile change alters how every node builds, but the
     # manifest doesn't change, so state:modified+ selects nothing. Only a full build tests it.
     requirements.txt|profiles/*)

@@ -348,6 +348,61 @@ scenario_15() {
   cleanup
 }
 
+scenario_16() {
+  echo "  scenario 16: dbt_project.yml vars change -> FULL_BUILD=true; other dbt_project.yml edits keep state fallback"
+  make_repo
+  printf 'name: p\nvars:\n  ga4:\n    conversion_events: ["purchase"]\nmodels:\n  +materialized: view\n' > "$REPO/dbt_project.yml"
+  git -C "$REPO" add dbt_project.yml
+  git -C "$REPO" commit -q -m "project"
+  BASE=$(git -C "$REPO" rev-parse HEAD)
+
+  # A package model reads the var, but its SQL is unchanged, so state:modified can't see the change.
+  sed 's/"purchase"/"form_submit"/' "$REPO/dbt_project.yml" > "$REPO/p.yml" && mv "$REPO/p.yml" "$REPO/dbt_project.yml"
+  git -C "$REPO" commit -qam "change a var"
+  run_script "$BASE"
+  assert_contains "$RUN_OUT" "FULL_BUILD=true" "a vars change forces a full build"
+  assert_contains "$RUN_ENV" "FULL_BUILD=true" "FULL_BUILD is exported to GITHUB_ENV"
+  BASE=$(git -C "$REPO" rev-parse HEAD)
+
+  sed 's/+materialized: view/+materialized: table/' "$REPO/dbt_project.yml" > "$REPO/p.yml" && mv "$REPO/p.yml" "$REPO/dbt_project.yml"
+  git -C "$REPO" commit -qam "change a config"
+  run_script "$BASE"
+  assert_contains "$RUN_OUT" "NEEDS_FALLBACK=true" "a config-only change falls back to state:modified+"
+  assert_contains "$RUN_OUT" "FULL_BUILD=false" "a config-only change does not force a full build"
+  cleanup
+}
+
+scenario_17() {
+  echo "  scenario 17: vars compared at the merge base; dbt_project.yml new at base"
+  make_repo
+  printf 'name: p\nvars:\n  a: 1\nmodels:\n  +materialized: view\n' > "$REPO/dbt_project.yml"
+  git -C "$REPO" add dbt_project.yml
+  git -C "$REPO" commit -q -m "project"
+  local fork
+  fork=$(git -C "$REPO" rev-parse HEAD)
+
+  # main moves on and changes a var; the PR branch only changes a config.
+  git -C "$REPO" checkout -q -b main_tip
+  sed 's/a: 1/a: 2/' "$REPO/dbt_project.yml" > "$REPO/p.yml" && mv "$REPO/p.yml" "$REPO/dbt_project.yml"
+  git -C "$REPO" commit -qam "main changes a var"
+  local main_tip
+  main_tip=$(git -C "$REPO" rev-parse HEAD)
+  git -C "$REPO" checkout -q -b pr "$fork"
+  sed 's/+materialized: view/+materialized: table/' "$REPO/dbt_project.yml" > "$REPO/p.yml" && mv "$REPO/p.yml" "$REPO/dbt_project.yml"
+  git -C "$REPO" commit -qam "pr changes a config"
+  run_script "$main_tip"
+  assert_contains "$RUN_OUT" "FULL_BUILD=false" "a vars change only on main does not force a full build"
+  cleanup
+
+  make_repo
+  printf 'name: p\nvars:\n  a: 1\n' > "$REPO/dbt_project.yml"
+  git -C "$REPO" add dbt_project.yml
+  git -C "$REPO" commit -q -m "add project"
+  run_script "$BASE"
+  assert_contains "$RUN_OUT" "FULL_BUILD=true" "a new dbt_project.yml with vars forces a full build"
+  cleanup
+}
+
 echo "test_get_changed_models.sh"
 scenario_1
 scenario_2
@@ -365,6 +420,8 @@ scenario_12
 scenario_13
 scenario_14
 scenario_15
+scenario_16
+scenario_17
 
 echo ""
 echo "passed: $PASS_COUNT  failed: $FAIL_COUNT"
